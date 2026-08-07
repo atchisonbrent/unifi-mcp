@@ -8,11 +8,7 @@ dependencies = [
     # API server registers controllers across all three products, so it
     # needs every product extra. unifi-core's optional extras pull in
     # aiounifi / uiprotect / py-unifi-access transparently.
-    "unifi-core[network,protect,access]>=0.4.22,<0.5",
-    # services/manifest.py imports unifi_mcp_shared.meta_tools. unifi-core does not
-    # depend on shared (import direction is app -> shared -> core), so this must be
-    # declared directly or a PyPI install has no unifi_mcp_shared.
-    "unifi-mcp-shared>=0.6.7,<0.7",
+    "unifi-core[network,protect,access]>=0.4.23,<0.5",
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.51.0",
     "sqlalchemy[asyncio]>=2.0.51",
@@ -27,6 +23,7 @@ dependencies = [
     "pyyaml>=6.0",
     "omegaconf>=2.3.0",
     "python-dotenv>=1.2.2",
+    "jsonschema>=4.23,<5",
 ]
 
 [project.scripts]
@@ -36,6 +33,7 @@ unifi-api-server = "unifi_api.cli:app"
 dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
     "pytest-xdist>=3.6.0",
     "httpx>=0.27.0",
 ]

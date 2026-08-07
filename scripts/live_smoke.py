@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 from mcp.types import CallToolResult
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+API_ACTION_CATALOG = REPO_ROOT / "apps/api/src/unifi_api/action_catalog.json"
 RUN_PREFIX = "codex-smoke"
 
 
@@ -1943,6 +1944,53 @@ API_ACTIONS_SAMPLE: list[tuple[str, str, dict[str, Any]]] = [
     ("access", "access_list_visitors", {}),
 ]
 
+API_ACTION_SENTINELS: dict[str, str] = {
+    "network": "unifi_list_clients",
+    "protect": "protect_list_cameras",
+    "access": "access_list_doors",
+}
+
+API_CONFIRMATION_NEGATIVE_CONTROLS: dict[str, tuple[str, dict[str, Any]]] = {
+    "network": ("unifi_reboot_device", {"mac_address": "00:00:00:00:00:00"}),
+    "protect": ("protect_reboot_camera", {"camera_id": "__confirmation_probe__"}),
+    "access": ("access_unlock_door", {"door_id": "__confirmation_probe__"}),
+}
+
+
+def _validate_api_action_catalog(response: object) -> dict[str, Any]:
+    expected_payload = json.loads(API_ACTION_CATALOG.read_text())
+    expected = {item["name"] for item in expected_payload["actions"]}
+    if not isinstance(response, dict) or not isinstance(response.get("items"), list):
+        raise ValueError("catalog response must contain an items array")
+    actual: set[str] = set()
+    for index, item in enumerate(response["items"]):
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError(f"catalog items[{index}].name must be a string")
+        actual.add(item["name"])
+    return {
+        "expected_count": len(expected),
+        "actual_count": len(actual),
+        "missing": sorted(expected - actual),
+        "unexpected": sorted(actual - expected),
+        "sentinels": {product: name in actual for product, name in API_ACTION_SENTINELS.items()},
+    }
+
+
+def _classify_confirmation_negative_control(status: int, response: object) -> dict[str, Any]:
+    error = str(response.get("error") or "") if isinstance(response, dict) else f"HTTP {status}: {response!r}"
+    passed = (
+        status == 200
+        and isinstance(response, dict)
+        and response.get("success") is False
+        and "requires confirm=true" in error
+    )
+    return {"passed": passed, "error": error}
+
+
+def _classify_api_action_result(success: bool | None, shape_match: bool) -> str:
+    """Require current live success; historical baselines are diagnostic only."""
+    return "pass" if success is True and shape_match else "regression"
+
 
 def _api_actions_baseline_dirs() -> dict[str, str]:
     """Map product -> baseline artifact directory under live-smoke-results/."""
@@ -2134,9 +2182,8 @@ def _live_count(summary: dict[str, Any]) -> int | None:
 def run_api_actions_phase(args: argparse.Namespace) -> int:
     """Manual-only phase: exercise read-only tools through POST /v1/actions/{name}.
 
-    Returns 0 on parity (every exercised tool succeeds AND matches the baseline
-    success flag). Returns non-zero when a NEW failure is observed compared to
-    the MCP-direct baseline.
+    Returns 0 only when every exercised tool succeeds. Baselines provide
+    comparison context, but can never convert a live API failure into a pass.
     """
     print("\n=== api-actions: spinning up unifi-api-server locally ===", flush=True)
     tmp_dir = Path(tempfile.mkdtemp(prefix="unifi-api-smoke-"))
@@ -2159,12 +2206,13 @@ def run_api_actions_phase(args: argparse.Namespace) -> int:
         "base_url": base_url,
         "db_path": str(db_path),
         "controllers": [],
+        "catalog_probe": None,
+        "confirmation_negative_controls": [],
         "results": [],
         "summary": {
             "tools_exercised": 0,
             "passed": 0,
             "regressions": 0,
-            "preexisting_failures": 0,
         },
     }
 
@@ -2198,6 +2246,41 @@ def run_api_actions_phase(args: argparse.Namespace) -> int:
 
         auth_headers = {"Authorization": f"Bearer {admin_key}"}
 
+        catalog_status, catalog_response = _http_request(
+            "GET",
+            f"{base_url}/v1/catalog/tools",
+            headers=auth_headers,
+        )
+        try:
+            catalog_probe = _validate_api_action_catalog(catalog_response)
+        except (OSError, json.JSONDecodeError, ValueError, KeyError) as exc:
+            catalog_probe = {
+                "expected_count": None,
+                "actual_count": None,
+                "missing": [],
+                "unexpected": [],
+                "sentinels": {},
+                "error": str(exc),
+            }
+        catalog_probe["http_status"] = catalog_status
+        catalog_probe["passed"] = (
+            catalog_status == 200
+            and not catalog_probe.get("error")
+            and not catalog_probe["missing"]
+            and not catalog_probe["unexpected"]
+            and all(catalog_probe["sentinels"].values())
+        )
+        artifact["catalog_probe"] = catalog_probe
+        print(
+            "  catalog probe: "
+            f"passed={catalog_probe['passed']} expected={catalog_probe['expected_count']} "
+            f"actual={catalog_probe['actual_count']}",
+            flush=True,
+        )
+        if not catalog_probe["passed"]:
+            artifact["summary"]["regressions"] += 1
+            return 1
+
         # Step 1: register controllers from .env
         controller_payloads = _api_actions_controllers_from_env()
         if not controller_payloads:
@@ -2222,6 +2305,38 @@ def run_api_actions_phase(args: argparse.Namespace) -> int:
                 }
             )
             print(f"  registered controller: {product} -> {body['id']}", flush=True)
+
+        for product in ("network", "protect", "access"):
+            controller_id = product_to_controller_id.get(product)
+            if controller_id is None:
+                continue
+            tool_name, tool_args = API_CONFIRMATION_NEGATIVE_CONTROLS[product]
+            negative_status, negative_response = _http_request(
+                "POST",
+                f"{base_url}/v1/actions/{tool_name}",
+                headers=auth_headers,
+                body={
+                    "site": os.environ.get("UNIFI_NETWORK_SITE") or "default",
+                    "controller": controller_id,
+                    "args": tool_args,
+                    "confirm": False,
+                },
+            )
+            negative_result = _classify_confirmation_negative_control(negative_status, negative_response)
+            artifact["confirmation_negative_controls"].append(
+                {
+                    "product": product,
+                    "tool": tool_name,
+                    "http_status": negative_status,
+                    **negative_result,
+                }
+            )
+            print(
+                f"  confirmation negative control: {tool_name} passed={negative_result['passed']}",
+                flush=True,
+            )
+            if not negative_result["passed"]:
+                artifact["summary"]["regressions"] += 1
 
         # Step 2: exercise the sample, comparing to baselines
         baselines = {p: _load_api_actions_baseline(p) for p in product_to_controller_id}
@@ -2278,17 +2393,9 @@ def run_api_actions_phase(args: argparse.Namespace) -> int:
             if isinstance(baseline_count, int) and isinstance(live_count, int):
                 count_delta = live_count - baseline_count
 
-            # Classification:
-            #   pass:          live success matches baseline (both True), shape matches.
-            #   preexisting:   baseline already failed (success != True). Not a regression.
-            #   regression:    baseline succeeded, but live failed.
-            classification: str
-            if success is True and (baseline_success is True or baseline_success is None):
-                classification = "pass"
-            elif baseline_success in (False, None) and success is not True:
-                classification = "preexisting" if baseline_success is False else "no_baseline"
-            else:
-                classification = "regression"
+            # A historical baseline is diagnostic context, not an exemption:
+            # every live API action exercised in this phase must work now.
+            classification = _classify_api_action_result(success, shape_match)
 
             artifact["results"].append(
                 {
@@ -2315,8 +2422,6 @@ def run_api_actions_phase(args: argparse.Namespace) -> int:
                 artifact["summary"]["passed"] += 1
             elif classification == "regression":
                 artifact["summary"]["regressions"] += 1
-            elif classification in {"preexisting", "no_baseline"}:
-                artifact["summary"]["preexisting_failures"] += 1
 
             print(
                 f"  api-actions {classification}: {tool_name} "

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -59,112 +59,52 @@ def test_report_counters():
     assert r.failed == 1
 
 
-def test_live_smoke_known_controller_issue_matches_exact_error_code():
-    import live_smoke
+def test_api_image_catalog_validation_requires_exact_generated_names():
+    import api_image_smoke
 
-    runner = live_smoke.LiveSmokeRunner.__new__(live_smoke.LiveSmokeRunner)
+    expected = {"unifi_list_clients", "protect_list_cameras", "access_list_doors"}
 
-    assert runner.expected_known_controller_issue(
-        "access_get_activity_summary",
-        "Proxy request failed: API code -3 CODE_SYSTEM_ERROR GET https://example.test",
-    )
-    assert not runner.expected_known_controller_issue(
-        "access_get_activity_summary",
-        "Proxy request failed: API code -30 CODE_SYSTEM_ERROR GET https://example.test",
+    result = api_image_smoke._validate_catalog_response(
+        {"items": [{"name": name} for name in sorted(expected)]},
+        expected,
     )
 
+    assert result == {"count": 3, "missing": [], "unexpected": []}
 
-def test_live_smoke_known_firewall_policy_rejection_requires_controller_code():
-    import live_smoke
 
-    runner = live_smoke.LiveSmokeRunner.__new__(live_smoke.LiveSmokeRunner)
+def test_api_image_catalog_validation_reports_drift():
+    import api_image_smoke
 
-    assert runner.expected_known_controller_issue(
-        "unifi_create_firewall_policy",
-        (
-            "Failed to create firewall policy: api.err.FirewallPolicyCreateRespondTrafficPolicyNotAllowed "
-            "Firewall policy create respond traffic not allowed"
-        ),
-    )
-    assert not runner.expected_known_controller_issue(
-        "unifi_create_firewall_policy",
-        "Failed to create firewall policy: Firewall policy create respond traffic not allowed",
+    result = api_image_smoke._validate_catalog_response(
+        {"items": [{"name": "unifi_list_clients"}, {"name": "obsolete_tool"}]},
+        {"unifi_list_clients", "protect_list_cameras"},
     )
 
-
-def test_live_smoke_seeds_protect_capability_preview_dependencies():
-    import live_smoke
-
-    runner = live_smoke.LiveSmokeRunner.__new__(live_smoke.LiveSmokeRunner)
-    runner.args = SimpleNamespace(tool=["protect_update_chime"])
-    runner.manifest = {
-        "tools": [
-            {"name": "protect_update_chime"},
-            {"name": "protect_list_chimes"},
-        ]
+    assert result == {
+        "count": 2,
+        "missing": ["protect_list_cameras"],
+        "unexpected": ["obsolete_tool"],
     }
 
-    assert runner.preview_seed_tool_names() == {"protect_list_chimes"}
 
+def test_api_image_catalog_fetch_can_read_response_larger_than_default_limit(monkeypatch):
+    import api_image_smoke
 
-def test_live_smoke_protect_capability_preview_args_from_seeded_inventory():
-    import live_smoke
+    body = b'{"items":[' + (b'{"name":"unifi_list_clients"},' * 300) + b'{"name":"last"}]}'
 
-    runner = live_smoke.LiveSmokeRunner.__new__(live_smoke.LiveSmokeRunner)
-    runner.cache = live_smoke.ResourceCache()
-    runner.connection_manager = SimpleNamespace(has_api_key=True)
+    class Response(io.BytesIO):
+        status = 200
 
-    runner.cache.remember(
-        "protect_list_sensors",
-        {"success": True, "data": {"sensors": [{"id": "sensor-1", "name": "Garage"}]}},
-    )
-    runner.cache.remember(
-        "protect_list_chimes",
-        {
-            "success": True,
-            "data": {
-                "chimes": [
-                    {
-                        "id": "chime-1",
-                        "name": "Doorbell Chime",
-                        "ring_settings": [{"camera_id": "camera-1", "volume": 75, "repeat_times": 2}],
-                    }
-                ]
-            },
-        },
-    )
-    runner.cache.remember(
-        "protect_list_viewers",
-        {"success": True, "data": {"viewers": [{"id": "viewer-1", "name": "Lobby Viewer"}]}},
-    )
+        def __enter__(self):
+            return self
 
-    assert runner.preview_args("protect_update_sensor_settings") == (
-        {"sensor_id": "sensor-1", "settings": {"name": "Garage"}},
-        "",
-    )
-    assert runner.preview_args("protect_update_chime") == (
-        {"chime_id": "chime-1", "settings": {"camera_id": "camera-1", "volume": 75}},
-        "",
-    )
-    assert runner.preview_args("protect_update_viewer") == (
-        {"viewer_id": "viewer-1", "settings": {"name": "Lobby Viewer"}},
-        "",
-    )
+        def __exit__(self, *_args):
+            self.close()
 
+    monkeypatch.setattr(api_image_smoke.urllib.request, "urlopen", lambda *_args, **_kwargs: Response(body))
 
-def test_live_smoke_protect_api_key_preview_skip_when_missing():
-    import live_smoke
+    status, fetched, _elapsed = api_image_smoke._hit("http://example.test/catalog", "key", max_bytes=None)
 
-    runner = live_smoke.LiveSmokeRunner.__new__(live_smoke.LiveSmokeRunner)
-    runner.cache = live_smoke.ResourceCache()
-    runner.connection_manager = SimpleNamespace(has_api_key=False)
-
-    runner.cache.remember(
-        "protect_list_sensors",
-        {"success": True, "data": {"sensors": [{"id": "sensor-1", "name": "Garage"}]}},
-    )
-
-    assert runner.preview_args("protect_update_sensor_settings") == (
-        None,
-        "requires UNIFI_PROTECT_API_KEY or UNIFI_API_KEY",
-    )
+    assert status == 200
+    assert fetched.encode() == body
+    assert len(fetched) > 8192

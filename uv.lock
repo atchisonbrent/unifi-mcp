@@ -1811,6 +1811,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "jinja2" },
+    { name = "jsonschema" },
     { name = "omegaconf" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -1819,7 +1820,6 @@ dependencies = [
     { name = "strawberry-graphql", extra = ["fastapi"] },
     { name = "typer" },
     { name = "unifi-core", extra = ["access", "network", "protect"] },
-    { name = "unifi-mcp-shared" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1828,6 +1828,7 @@ dev = [
     { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
     { name = "pytest-xdist" },
 ]
 
@@ -1839,6 +1840,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42.0.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "omegaconf", specifier = ">=2.3.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
@@ -1847,7 +1849,6 @@ requires-dist = [
     { name = "strawberry-graphql", extras = ["fastapi"], specifier = ">=0.323.2,<0.324.0" },
     { name = "typer", specifier = ">=0.26.8" },
     { name = "unifi-core", extras = ["access", "network", "protect"], editable = "packages/unifi-core" },
-    { name = "unifi-mcp-shared", editable = "packages/unifi-mcp-shared" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.51.0" },
 ]
 
@@ -1856,6 +1857,7 @@ dev = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=0.21.0" },
+    { name = "pytest-cov", specifier = ">=4.0.0" },
     { name = "pytest-xdist", specifier = ">=3.6.0" },
 ]
 

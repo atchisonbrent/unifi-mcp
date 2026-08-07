@@ -32,6 +32,47 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/unifi-api-server
 
 jobs:
+  published-core-contract:
+    name: Verify published Core dependency floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Install and verify the exact published Core floor
+        run: python3 scripts/check_pin_alignment.py --api-core-floor-only
+
+  generated-contracts:
+    name: Verify generated action contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install all generation inputs
+        run: uv sync --all-packages
+
+      - name: Verify catalog tests and committed artifacts
+        run: make catalog-test check-generated
+
   # ----------------------------------------------------------------------- 1
   test:
     name: Run unifi-api-server tests
@@ -50,8 +91,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install workspace
-        run: uv sync --all-packages
+      - name: Install standalone API dependency closure
+        run: uv sync --package unifi-api-server
 
       - name: Run tests
         run: uv run --package unifi-api-server pytest apps/api/tests -n auto -q
@@ -59,7 +100,7 @@ jobs:
   # ----------------------------------------------------------------------- 2a
   publish-pypi:
     name: Build wheel + publish to PyPI
-    needs: test
+    needs: [test, generated-contracts, published-core-contract]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -96,7 +137,7 @@ jobs:
   # ----------------------------------------------------------------------- 2b
   publish-docker:
     name: Build + push Docker image
-    needs: test
+    needs: [test, generated-contracts, published-core-contract]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -107,6 +148,9 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Start and smoke-test the release image
+        run: ./scripts/smoke-api-image.sh
 
       - uses: docker/setup-qemu-action@v4
 

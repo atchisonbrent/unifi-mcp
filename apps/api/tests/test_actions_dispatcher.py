@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,10 +14,11 @@ from unifi_api.services.actions import (
     build_dispatch_table,
     dispatch_action,
 )
+from unifi_api.services.dispatch_overrides import DISPATCH_ARG_TRANSLATORS, DISPATCH_RESULT_ADAPTERS
 from unifi_api.services.manifest import ManifestRegistry, ToolEntry, ToolNotFound
 from unifi_core.redaction import REDACTED
 
-PRODUCTION_REGISTRY = ManifestRegistry.load_from_apps()
+PRODUCTION_REGISTRY = ManifestRegistry.load()
 
 
 def _registry_with(tool: ToolEntry) -> ManifestRegistry:
@@ -24,10 +26,53 @@ def _registry_with(tool: ToolEntry) -> ManifestRegistry:
         production_entry = PRODUCTION_REGISTRY.resolve(tool.name)
         tool = replace(
             tool,
+            manager=production_entry.manager,
+            method=production_entry.method,
             permission_action=production_entry.permission_action,
             read_only_hint=production_entry.read_only_hint,
         )
     return ManifestRegistry({tool.name: tool})
+
+
+@pytest.mark.asyncio
+async def test_catalog_binding_is_authoritative_and_accepts_sync_result() -> None:
+    entry = ToolEntry(
+        name="unifi_get_event_types",
+        product="network",
+        category="events",
+        manager="event_manager",
+        method="get_event_type_prefixes",
+        permission_action="read",
+        read_only_hint=True,
+    )
+    manager = MagicMock()
+    manager.get_event_type_prefixes.return_value = {"EVT_WU_": "wireless"}
+    factory = MagicMock()
+    factory.get_domain_manager = AsyncMock(return_value=manager)
+    connection = MagicMock(site="default")
+    factory.get_connection_manager = AsyncMock(return_value=connection)
+    session = MagicMock()
+
+    result = await dispatch_action(
+        registry=ManifestRegistry({entry.name: entry}),
+        factory=factory,
+        session=session,
+        tool_name=entry.name,
+        controller_id="cid",
+        controller_products=["network"],
+        site="default",
+        args={},
+        confirm=False,
+    )
+
+    assert result == {"EVT_WU_": "wireless"}
+    factory.get_domain_manager.assert_awaited_once_with(
+        session=session,
+        controller_id="cid",
+        product="network",
+        attr_name="event_manager",
+    )
+    manager.get_event_type_prefixes.assert_called_once_with()
 
 
 def _dispatchable_entries() -> list[tuple[str, ToolEntry]]:
@@ -307,6 +352,37 @@ async def test_confirmed_mutation_actions_reach_manager_unchanged(permission_act
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("manager_result", [None, False])
+async def test_confirmed_mutation_rejects_bare_manager_failure(manager_result: object) -> None:
+    entry = ToolEntry(
+        name="access_update_test_resource",
+        product="access",
+        category="test",
+        manager="test_manager",
+        method="apply_action",
+        permission_action="update",
+        read_only_hint=False,
+    )
+    manager = MagicMock()
+    manager.apply_action = AsyncMock(return_value=manager_result)
+    factory = MagicMock()
+    factory.get_domain_manager = AsyncMock(return_value=manager)
+
+    with pytest.raises(ValueError, match="reported failure"):
+        await dispatch_action(
+            registry=ManifestRegistry({entry.name: entry}),
+            factory=factory,
+            session=MagicMock(),
+            tool_name=entry.name,
+            controller_id="cid",
+            controller_products=[entry.product],
+            site="default",
+            args={},
+            confirm=True,
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("permission_action", "read_only_hint"),
     [
@@ -480,7 +556,7 @@ async def test_dispatch_updates_site_when_changed() -> None:
         controller_id="cid",
         controller_products=["network"],
         site="upstairs",
-        args={"limit": 10},
+        args={},
         confirm=False,
         dispatch_table={
             "unifi_list_clients": DispatchEntry(manager_attr="client_manager", method="get_clients"),
@@ -559,8 +635,8 @@ def test_dispatch_overrides_specific_targets() -> None:
     assert table["unifi_update_traffic_route"].method == "update_traffic_route"
     # Stats: list-returning method (was AST-captured as get_X_details, a dict)
     assert table["unifi_get_device_stats"].manager_attr == "stats_manager"
-    assert table["unifi_get_device_stats"].method == "get_device_stats"
-    assert table["unifi_get_client_stats"].method == "get_client_stats"
+    assert table["unifi_get_device_stats"].method == "get_device_stats_for_identifier"
+    assert table["unifi_get_client_stats"].method == "get_client_stats_for_identifier"
 
     # Protect preview/execute split
     assert table["protect_reboot_camera"].method == "apply_reboot_camera"
@@ -2072,9 +2148,8 @@ async def test_dispatch_translates_set_client_ip_settings_mac_address_to_client_
 
 
 @pytest.mark.asyncio
-async def test_dispatch_translates_list_clients_strips_filter_kwargs() -> None:
-    """unifi_list_clients: filter_type/include_offline/limit are tool-only;
-    get_clients() accepts no arguments."""
+async def test_dispatch_rejects_list_clients_wrapper_only_kwargs() -> None:
+    """The typed action endpoint must not silently discard MCP-only filters."""
     entry = ToolEntry(
         name="unifi_list_clients",
         product="network",
@@ -2095,22 +2170,23 @@ async def test_dispatch_translates_list_clients_strips_filter_kwargs() -> None:
     factory.get_domain_manager = AsyncMock(return_value=domain_manager)
     factory.get_connection_manager = AsyncMock(return_value=conn_manager)
 
-    await dispatch_action(
-        registry=registry,
-        factory=factory,
-        session=MagicMock(),
-        tool_name="unifi_list_clients",
-        controller_id="cid",
-        controller_products=["network"],
-        site="default",
-        args={"filter_type": "wireless", "include_offline": False, "limit": 50},
-        confirm=False,
-        dispatch_table={
-            "unifi_list_clients": DispatchEntry(manager_attr="client_manager", method="get_clients"),
-        },
-    )
+    with pytest.raises(ValueError, match="filter_type.*include_offline.*limit.*not supported"):
+        await dispatch_action(
+            registry=registry,
+            factory=factory,
+            session=MagicMock(),
+            tool_name="unifi_list_clients",
+            controller_id="cid",
+            controller_products=["network"],
+            site="default",
+            args={"filter_type": "wireless", "include_offline": False, "limit": 50},
+            confirm=False,
+            dispatch_table={
+                "unifi_list_clients": DispatchEntry(manager_attr="client_manager", method="get_clients"),
+            },
+        )
 
-    domain_manager.get_clients.assert_awaited_once_with()
+    domain_manager.get_clients.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -2347,3 +2423,682 @@ async def test_dispatch_translates_get_top_clients_duration_to_hours() -> None:
     )
 
     domain_manager.get_top_clients.assert_awaited_once_with(duration_hours=168, limit=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "args", "expected_method", "expected_kwargs"),
+    [
+        (
+            "unifi_reboot_device",
+            {"mac_address": "aa:bb:cc:dd:ee:ff"},
+            "reboot_device",
+            {"device_mac": "aa:bb:cc:dd:ee:ff"},
+        ),
+        (
+            "access_create_credential",
+            {"credential_type": "pin", "credential_data": {"pin_code": "1234"}},
+            "apply_create_credential",
+            {"credential_type": "pin", "data": {"pin_code": "1234"}},
+        ),
+        (
+            "protect_alarm_create_rule",
+            {"body": {"name": "Front door", "actions": [{"type": "webhook"}]}},
+            "create_rule",
+            {"fields": {"name": "Front door", "actions": [{"type": "webhook"}]}},
+        ),
+        (
+            "unifi_set_outlet_state",
+            {
+                "mac_address": "aa:bb:cc:dd:ee:ff",
+                "outlet_index": 2,
+                "relay_state": False,
+                "cycle_enabled": True,
+            },
+            "set_outlet_state",
+            {
+                "device_mac": "aa:bb:cc:dd:ee:ff",
+                "outlet_index": 2,
+                "relay_state": False,
+                "cycle_enabled": True,
+            },
+        ),
+        (
+            "unifi_update_port_forward",
+            {"port_forward_id": "pf-1", "update_data": {"enabled": False}},
+            "update_port_forward",
+            {"rule_id": "pf-1", "updates": {"enabled": False}},
+        ),
+        (
+            "unifi_toggle_qos_rule_enabled",
+            {"rule_id": "qos-1"},
+            "toggle_qos_rule_enabled",
+            {"rule_id": "qos-1"},
+        ),
+    ],
+    ids=[
+        "network-identifier-alias",
+        "access-payload-alias",
+        "protect-payload-alias",
+        "outlet-mutation-binding",
+        "port-forward-mutation-binding",
+        "qos-toggle-bridge",
+    ],
+)
+async def test_reviewed_catalog_mutations_reach_the_intended_core_signature(
+    tool_name: str,
+    args: dict,
+    expected_method: str,
+    expected_kwargs: dict,
+) -> None:
+    """Regression coverage for failures found by the independent catalog review."""
+    entry = PRODUCTION_REGISTRY.resolve(tool_name)
+    manager = MagicMock()
+    manager_result = ({"ok": True}, True) if tool_name.startswith("protect_alarm_") else {"ok": True}
+    manager_method = AsyncMock(return_value=manager_result)
+    setattr(manager, expected_method, manager_method)
+    factory = MagicMock()
+    factory.get_domain_manager = AsyncMock(return_value=manager)
+    factory.get_connection_manager = AsyncMock(return_value=MagicMock(site="default"))
+
+    result = await dispatch_action(
+        registry=PRODUCTION_REGISTRY,
+        factory=factory,
+        session=MagicMock(),
+        tool_name=tool_name,
+        controller_id="cid",
+        controller_products=[entry.product],
+        site="default",
+        args=args,
+        confirm=True,
+    )
+
+    assert result == {"ok": True}
+    manager_method.assert_awaited_once_with(**expected_kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "args", "expected_method", "expected_kwargs"),
+    [
+        (
+            "unifi_create_client_group",
+            {"name": "Kids", "members": ["aa:bb:cc:dd:ee:ff"]},
+            "create_client_group",
+            {"group_data": {"name": "Kids", "members": ["aa:bb:cc:dd:ee:ff"], "type": "CLIENTS"}},
+        ),
+        (
+            "unifi_create_port_forward",
+            {
+                "port_forward_data": {
+                    "name": "HTTPS",
+                    "dst_port": "443",
+                    "fwd_port": "8443",
+                    "fwd_ip": "192.168.1.20",
+                    "protocol": "tcp_udp",
+                }
+            },
+            "create_port_forward",
+            {
+                "rule_data": {
+                    "name": "HTTPS",
+                    "dst_port": "443",
+                    "fwd_port": "8443",
+                    "fwd": "192.168.1.20",
+                    "proto": "tcp/udp",
+                    "enabled": True,
+                    "log": False,
+                    "protocol_match_excepted": False,
+                }
+            },
+        ),
+        (
+            "unifi_create_simple_port_forward",
+            {"rule": {"name": "HTTP", "ext_port": "80", "to_ip": "192.168.1.21"}},
+            "create_port_forward",
+            {
+                "rule_data": {
+                    "name": "HTTP",
+                    "dst_port": "80",
+                    "fwd_port": "80",
+                    "fwd": "192.168.1.21",
+                    "proto": "tcp/udp",
+                    "enabled": True,
+                    "log": False,
+                    "protocol_match_excepted": False,
+                }
+            },
+        ),
+        (
+            "unifi_create_simple_qos_rule",
+            {
+                "rule": {
+                    "name": "Video",
+                    "interface": "wan",
+                    "direction": "download",
+                    "limit_kbps": 5000,
+                    "target": {"type": "ip", "value": "192.168.1.50"},
+                }
+            },
+            "create_qos_rule",
+            {
+                "rule_data": {
+                    "name": "Video",
+                    "interface": "wan",
+                    "direction": "download",
+                    "bandwidth_limit_kbps": 5000,
+                    "enabled": True,
+                    "target_ip_address": "192.168.1.50",
+                }
+            },
+        ),
+        (
+            "unifi_update_port_forward",
+            {
+                "port_forward_id": "pf-1",
+                "update_data": {"protocol": "udp", "src_ip": "", "enabled": False},
+            },
+            "update_port_forward",
+            {"rule_id": "pf-1", "updates": {"proto": "udp", "src": None, "enabled": False}},
+        ),
+        (
+            "unifi_update_firewall_policy",
+            {
+                "policy_id": "p-1",
+                "update_data": {
+                    "action": "allow",
+                    "ip_version": "IPv4",
+                    "connection_state_type": "custom",
+                    "connection_states": ["new"],
+                },
+            },
+            "update_firewall_policy",
+            {
+                "policy_id": "p-1",
+                "updates": {
+                    "action": "ALLOW",
+                    "ip_version": "IPV4",
+                    "connection_state_type": "CUSTOM",
+                    "connection_states": ["NEW"],
+                },
+            },
+        ),
+        (
+            "unifi_update_content_filter",
+            {
+                "filter_id": "cf-1",
+                "filter_data": {"blocked_categories": ["ADULT"], "schedule_mode": "ALWAYS"},
+            },
+            "update_content_filter",
+            {"filter_id": "cf-1", "update_data": {"categories": ["ADULT"], "schedule": {"mode": "ALWAYS"}}},
+        ),
+    ],
+)
+async def test_reviewed_catalog_mutations_preserve_wrapper_semantics(
+    tool_name: str,
+    args: dict,
+    expected_method: str,
+    expected_kwargs: dict,
+) -> None:
+    entry = PRODUCTION_REGISTRY.resolve(tool_name)
+    manager = MagicMock()
+    manager_method = AsyncMock(return_value={"ok": True})
+    setattr(manager, expected_method, manager_method)
+    factory = MagicMock()
+    factory.get_domain_manager = AsyncMock(return_value=manager)
+    factory.get_connection_manager = AsyncMock(return_value=MagicMock(site="default"))
+
+    await dispatch_action(
+        registry=PRODUCTION_REGISTRY,
+        factory=factory,
+        session=MagicMock(),
+        tool_name=tool_name,
+        controller_id="cid",
+        controller_products=[entry.product],
+        site="default",
+        args=args,
+        confirm=True,
+    )
+
+    manager_method.assert_awaited_once_with(**expected_kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "args", "parameter"),
+    [
+        ("unifi_list_clients", {"include_offline": True}, "include_offline"),
+        ("unifi_list_devices", {"limit": 5}, "limit"),
+        ("unifi_get_client_details", {"mac_address": "aa:bb:cc:dd:ee:ff", "summary": True}, "summary"),
+        ("unifi_list_firewall_policies", {"search": "guest"}, "search"),
+        ("unifi_list_networks", {"fields": "id,name"}, "fields"),
+    ],
+)
+async def test_wrapper_only_action_parameters_fail_explicitly(
+    tool_name: str,
+    args: dict,
+    parameter: str,
+) -> None:
+    entry = PRODUCTION_REGISTRY.resolve(tool_name)
+    factory = MagicMock()
+
+    with pytest.raises(ValueError, match=rf"{parameter}.*not supported"):
+        await dispatch_action(
+            registry=PRODUCTION_REGISTRY,
+            factory=factory,
+            session=MagicMock(),
+            tool_name=tool_name,
+            controller_id="cid",
+            controller_products=[entry.product],
+            site="default",
+            args=args,
+            confirm=False,
+        )
+
+    factory.get_domain_manager.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reference_does_not_fetch_image_bytes() -> None:
+    entry = PRODUCTION_REGISTRY.resolve("protect_get_snapshot")
+    factory = MagicMock()
+
+    result = await dispatch_action(
+        registry=PRODUCTION_REGISTRY,
+        factory=factory,
+        session=MagicMock(),
+        tool_name=entry.name,
+        controller_id="cid",
+        controller_products=[entry.product],
+        site="default",
+        args={"camera_id": "camera-1"},
+        confirm=False,
+    )
+
+    assert result == {"snapshot_url": "protect://cameras/camera-1/snapshot"}
+    factory.get_domain_manager.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_image_result_is_base64_encoded() -> None:
+    entry = PRODUCTION_REGISTRY.resolve("protect_get_snapshot")
+    manager = MagicMock()
+    manager.get_snapshot = AsyncMock(return_value=b"jpeg-data")
+    factory = MagicMock()
+    factory.get_domain_manager = AsyncMock(return_value=manager)
+
+    result = await dispatch_action(
+        registry=PRODUCTION_REGISTRY,
+        factory=factory,
+        session=MagicMock(),
+        tool_name=entry.name,
+        controller_id="cid",
+        controller_products=[entry.product],
+        site="default",
+        args={"camera_id": "camera-1", "include_image": True},
+        confirm=False,
+    )
+
+    assert result == {
+        "image_base64": base64.b64encode(b"jpeg-data").decode(),
+        "content_type": "image/jpeg",
+    }
+    manager.get_snapshot.assert_awaited_once_with(camera_id="camera-1")
+
+
+@pytest.mark.asyncio
+async def test_recent_events_strips_internal_and_unrequested_metadata() -> None:
+    entry = PRODUCTION_REGISTRY.resolve("protect_recent_events")
+    manager = MagicMock(buffer_size=2)
+    manager.get_recent_from_buffer.return_value = [
+        {"id": "event-1", "type": "motion", "_buffered_at": 123, "metadata": {"weather": "rain"}}
+    ]
+    factory = MagicMock()
+    factory.get_domain_manager = AsyncMock(return_value=manager)
+
+    result = await dispatch_action(
+        registry=PRODUCTION_REGISTRY,
+        factory=factory,
+        session=MagicMock(),
+        tool_name=entry.name,
+        controller_id="cid",
+        controller_products=[entry.product],
+        site="default",
+        args={},
+        confirm=False,
+    )
+
+    assert result == {
+        "events": [{"id": "event-1", "type": "motion", "smart_detect_types": []}],
+        "count": 1,
+        "source": "websocket_buffer",
+        "buffer_size": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args", "expected_kwargs"),
+    [
+        (
+            "unifi_create_oon_policy",
+            {
+                "name": "Kids",
+                "target_type": "clients",
+                "targets": ["aa:bb:cc:dd:ee:ff"],
+                "secure": {"internet_access_enabled": False},
+            },
+            {
+                "policy_data": {
+                    "name": "Kids",
+                    "enabled": True,
+                    "target_type": "CLIENTS",
+                    "targets": ["aa:bb:cc:dd:ee:ff"],
+                    "secure": {"internet_access_enabled": False},
+                }
+            },
+        ),
+        (
+            "unifi_create_qos_rule",
+            {
+                "qos_data": {
+                    "name": "Voice",
+                    "interface": "wan",
+                    "direction": "upload",
+                    "bandwidth_limit_kbps": 1000,
+                    "id": "read-only",
+                }
+            },
+            {
+                "rule_data": {
+                    "name": "Voice",
+                    "interface": "wan",
+                    "direction": "upload",
+                    "bandwidth_limit_kbps": 1000,
+                    "enabled": True,
+                }
+            },
+        ),
+        (
+            "unifi_update_autobackup_settings",
+            {"update_data": {"autobackup_enabled": False, "unknown": "drop"}},
+            {"settings": {"autobackup_enabled": False}},
+        ),
+        (
+            "unifi_update_client_group",
+            {"group_id": "g-1", "group_data": {"name": "New", "id": "read-only"}},
+            {"group_id": "g-1", "update_data": {"name": "New"}},
+        ),
+        (
+            "unifi_update_dns_record",
+            {"record_id": "d-1", "update_data": {"ttl": 60, "id": "read-only"}},
+            {"record_id": "d-1", "record_data": {"ttl": 60}},
+        ),
+        (
+            "unifi_update_oon_policy",
+            {"policy_id": "o-1", "policy_data": {"enabled": False, "id": "read-only"}},
+            {"policy_id": "o-1", "update_data": {"enabled": False}},
+        ),
+        (
+            "unifi_update_port_profile",
+            {"profile_id": "p-1", "profile_data": {"poe_mode": "off", "id": "read-only"}},
+            {"profile_id": "p-1", "update_data": {"poe_mode": "off"}},
+        ),
+        (
+            "unifi_update_device_radio",
+            {
+                "mac_address": "aa:bb:cc:dd:ee:ff",
+                "radio": "na",
+                "channel": 36,
+                "unknown": "drop",
+            },
+            {"device_mac": "aa:bb:cc:dd:ee:ff", "radio_id": "na", "updates": {"channel": 36}},
+        ),
+        (
+            "access_create_credential",
+            {
+                "credential_type": "pin",
+                "credential_data": {"user_id": "u-1", "pin_code": "1234", "admin": True},
+            },
+            {"credential_type": "pin", "data": {"user_id": "u-1", "pin_code": "1234"}},
+        ),
+    ],
+)
+def test_model_backed_translators_filter_and_default_public_payloads(
+    tool_name: str,
+    args: dict,
+    expected_kwargs: dict,
+) -> None:
+    positional, kwargs = DISPATCH_ARG_TRANSLATORS[tool_name](args)
+    assert positional == ()
+    assert kwargs == expected_kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        ("protect_get_snapshot", {"camera_id": "camera-1", "include_image": "false"}),
+        ("protect_recent_events", {"metadata_fields": "*"}),
+        ("unifi_get_event_types", {"unexpected": True}),
+    ],
+)
+async def test_catalog_input_schema_rejects_wrong_types_and_unknown_args_before_manager(
+    tool_name: str,
+    args: dict,
+) -> None:
+    entry = PRODUCTION_REGISTRY.resolve(tool_name)
+    factory = MagicMock()
+
+    with pytest.raises(ValueError, match="Invalid action arguments"):
+        await dispatch_action(
+            registry=PRODUCTION_REGISTRY,
+            factory=factory,
+            session=MagicMock(),
+            tool_name=tool_name,
+            controller_id="cid",
+            controller_products=[entry.product],
+            site="default",
+            args=args,
+            confirm=False,
+        )
+
+    factory.get_domain_manager.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_semantic_translator_rejects_physical_mutation_before_manager() -> None:
+    entry = PRODUCTION_REGISTRY.resolve("protect_ptz_move")
+    factory = MagicMock()
+
+    with pytest.raises(ValueError, match="less than or equal to 1000"):
+        await dispatch_action(
+            registry=PRODUCTION_REGISTRY,
+            factory=factory,
+            session=MagicMock(),
+            tool_name=entry.name,
+            controller_id="cid",
+            controller_products=[entry.product],
+            site="default",
+            args={"camera_id": "camera-1", "pan": 1000.9},
+            confirm=True,
+        )
+
+    factory.get_domain_manager.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args", "message"),
+    [
+        ("unifi_update_gateway_settings", {"update_data": {}}, "update_data cannot be empty"),
+        (
+            "unifi_update_gateway_settings",
+            {"update_data": {"_id": "read-only", "unknown": True}},
+            "No valid mutable fields",
+        ),
+        (
+            "access_create_credential",
+            {"credential_type": "pin", "credential_data": {}},
+            "No credential data provided",
+        ),
+        (
+            "unifi_set_client_ip_settings",
+            {"mac_address": "aa:bb:cc:dd:ee:ff"},
+            "At least one setting must be provided",
+        ),
+        (
+            "unifi_update_device_radio",
+            {"mac_address": "aa:bb:cc:dd:ee:ff", "radio": "na", "tx_power": 20},
+            "tx_power can only be set",
+        ),
+        (
+            "unifi_update_device_radio",
+            {"mac_address": "aa:bb:cc:dd:ee:ff", "radio": "invalid", "channel": 36},
+            "Invalid radio",
+        ),
+        (
+            "unifi_set_device_led",
+            {"device_mac": "aa:bb:cc:dd:ee:ff", "led_state": "blink"},
+            "Invalid led_state",
+        ),
+        (
+            "unifi_authorize_guest",
+            {"mac_address": "aa:bb:cc:dd:ee:ff", "minutes": 0},
+            "greater than or equal to 1",
+        ),
+        (
+            "unifi_create_route",
+            {"name": " ", "network": "not-cidr", "nexthop": "not-ip", "distance": 0},
+            "Name is required",
+        ),
+        (
+            "unifi_update_route",
+            {"route_id": "route-1"},
+            "At least one field must be provided",
+        ),
+        (
+            "access_unlock_door",
+            {"door_id": "door-1", "duration": 0},
+            "greater than or equal to 1",
+        ),
+        (
+            "protect_ptz_preset",
+            {"camera_id": "camera-1", "preset_slot": -1},
+            "greater than or equal to 0",
+        ),
+        (
+            "protect_export_clip",
+            {
+                "camera_id": "camera-1",
+                "start": "2026-01-01T00:00:00Z",
+                "end": "2026-01-01T00:01:00Z",
+                "channel_index": 3,
+            },
+            "less than or equal to 2",
+        ),
+        (
+            "protect_trigger_chime",
+            {"chime_id": "chime-1", "volume": 101},
+            "less than or equal to 100",
+        ),
+        (
+            "protect_ptz_move",
+            {"camera_id": "camera-1", "pan": 1000.9},
+            "less than or equal to 1000",
+        ),
+        (
+            "protect_toggle_rtsp",
+            {"camera_id": "camera-1", "enabled": True, "quality": "HIGH"},
+            "Input should be",
+        ),
+        (
+            "protect_alarm_update_rule",
+            {"rule_id": "rule-1", "fields": {}},
+            "No fields provided",
+        ),
+        (
+            "protect_alarm_create_rule",
+            {"body": {"title": "Broken", "actions": []}},
+            "actions must be a non-empty list",
+        ),
+    ],
+)
+def test_semantic_translators_reject_payloads_the_mcp_wrapper_rejects(
+    tool_name: str,
+    args: dict,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        DISPATCH_ARG_TRANSLATORS[tool_name](args)
+
+
+@pytest.mark.parametrize("limit", [None, 0, -1])
+def test_access_list_users_normalizes_nonpositive_or_omitted_limit(limit: int | None) -> None:
+    args = {} if limit is None else {"limit": limit}
+
+    positional, kwargs = DISPATCH_ARG_TRANSLATORS["access_list_users"](args)
+
+    assert positional == ()
+    assert kwargs == {"page_size": 25}
+
+
+def test_simple_port_forward_matches_wrapper_empty_port_and_unknown_protocol_fallback() -> None:
+    positional, kwargs = DISPATCH_ARG_TRANSLATORS["unifi_create_simple_port_forward"](
+        {
+            "rule": {
+                "name": "Odd but wrapper-compatible",
+                "ext_port": "8443",
+                "int_port": "",
+                "to_ip": "192.168.1.20",
+                "protocol": "unexpected",
+            }
+        }
+    )
+
+    assert positional == ()
+    assert kwargs["rule_data"]["fwd_port"] == ""
+    assert kwargs["rule_data"]["proto"] == "tcp/udp"
+
+
+def test_omitted_public_defaults_are_injected_before_required_manager_calls() -> None:
+    _, detection_kwargs = DISPATCH_ARG_TRANSLATORS["protect_search_detections"]({"labels": ["color:black"]})
+    assert detection_kwargs == {
+        "labels": ["color:black"],
+        "limit": 100,
+        "order": "desc",
+        "exclude_motion": True,
+        "min_confidence": None,
+        "start": None,
+        "end": None,
+    }
+
+    _, voucher_kwargs = DISPATCH_ARG_TRANSLATORS["unifi_create_voucher"]({})
+    assert voucher_kwargs["expire_minutes"] == 1440
+    assert voucher_kwargs["count"] == 1
+    assert voucher_kwargs["quota"] == 1
+
+
+def test_top_clients_unknown_duration_matches_wrapper_one_hour_fallback() -> None:
+    _, kwargs = DISPATCH_ARG_TRANSLATORS["unifi_get_top_clients"]({"duration": "typo"})
+    assert kwargs == {"duration_hours": 1, "limit": 10}
+
+
+def test_alarm_facade_result_adapter_unwraps_result_and_preserves_coverage() -> None:
+    adapter = DISPATCH_RESULT_ADAPTERS["protect_alarm_create_rule"]
+
+    complete = adapter(({"id": "rule-1"}, True), {}, MagicMock())
+    fallback = adapter(({"id": "rule-2"}, False), {}, MagicMock())
+
+    assert complete == {"id": "rule-1"}
+    assert fallback["id"] == "rule-2"
+    assert fallback["_meta"]["com.github.sirkirby.unifi-mcp/alarm-coverage"]["complete"] is False
+
+
+def test_delete_recording_result_adapter_rejects_unsupported_operation() -> None:
+    adapter = DISPATCH_RESULT_ADAPTERS["protect_delete_recording"]
+
+    with pytest.raises(ValueError, match="not supported"):
+        adapter(
+            {"supported": False, "message": "Individual recording deletion is not supported"},
+            {},
+            MagicMock(),
+        )

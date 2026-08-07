@@ -1,5 +1,6 @@
-.PHONY: help sync build check test lint format format-check format-fix manifest generate server-manifests skill-references \
-       check-skill-references check-generated pre-commit ci core-test shared-test protocol-smoke \
+.PHONY: help sync build check test lint format format-check format-fix manifest generate api-action-catalog \
+       check-api-action-catalog server-manifests skill-references check-skill-references check-generated \
+       pre-commit ci core-test shared-test catalog-test protocol-smoke \
        docs-test relay-test worker-install worker-test worker-typecheck worker-build worker-check docker-relay \
        docker-build docker-up docker-down docker-logs
 
@@ -16,6 +17,7 @@ help:
 	@echo "  make format-fix     Auto-fix lint issues in the full workspace"
 	@echo "  make generate       Regenerate committed generated artifacts"
 	@echo "  make manifest       Regenerate tool manifests + skill references"
+	@echo "  make api-action-catalog  Regenerate the API action catalog"
 	@echo "  make check-generated  Check generated artifacts for drift"
 	@echo "  make ci             Lint + generated drift checks + tests"
 	@echo "  make server-manifests  Regenerate server.json for all apps (MCP Registry)"
@@ -30,6 +32,7 @@ help:
 	@echo ""
 	@echo "  make core-test      Run unifi-core tests only"
 	@echo "  make shared-test    Run unifi-mcp-shared tests only"
+	@echo "  make catalog-test   Run generated-catalog and live-harness contract tests"
 	@echo "  make protocol-smoke Run MCP protocol conformance smoke tests"
 	@echo "  make worker-build   Install worker deps + typecheck Worker app"
 	@echo "  make worker-check   Run worker CLI tests + TypeScript checks"
@@ -50,10 +53,13 @@ core-test:
 shared-test:
 	uv run --package unifi-mcp-shared pytest packages/unifi-mcp-shared/tests -v
 
+catalog-test:
+	uv run pytest tests/test_generate_api_action_catalog.py tests/test_live_smoke_harness.py -v
+
 docs-test:
 	uv run python -m unittest discover -s tests/docs -p 'test_*.py' -v
 
-test: core-test shared-test docs-test relay-test protocol-smoke worker-test
+test: core-test shared-test catalog-test docs-test relay-test protocol-smoke worker-test
 	$(MAKE) -C apps/network test
 	$(MAKE) -C apps/protect test
 	$(MAKE) -C apps/access test
@@ -78,8 +84,15 @@ manifest:
 	$(MAKE) -C apps/network manifest
 	$(MAKE) -C apps/protect manifest
 	$(MAKE) -C apps/access manifest
+	$(MAKE) api-action-catalog
 	$(MAKE) skill-references
 	$(MAKE) server-manifests
+
+api-action-catalog:
+	uv run python scripts/generate_api_action_catalog.py
+
+check-api-action-catalog:
+	uv run python scripts/generate_api_action_catalog.py --check
 
 server-manifests:
 	$(MAKE) -C apps/network server-manifest
@@ -92,7 +105,7 @@ skill-references:
 check-skill-references:
 	python3 scripts/generate_skill_references.py --check
 
-check-generated: check-skill-references
+check-generated: check-skill-references check-api-action-catalog
 
 relay-test:
 	uv run --package unifi-mcp-relay pytest packages/unifi-mcp-relay/tests -v
@@ -117,7 +130,13 @@ worker-check: worker-typecheck worker-test
 docker-relay:
 	docker build -f packages/unifi-mcp-relay/Dockerfile -t unifi-mcp-relay .
 
-pre-commit: format generate lint test check-generated worker-typecheck
+pre-commit:
+	$(MAKE) format
+	$(MAKE) generate
+	$(MAKE) lint
+	$(MAKE) test
+	$(MAKE) check-generated
+	$(MAKE) worker-typecheck
 
 ci: check
 

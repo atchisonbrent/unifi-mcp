@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -24,7 +24,12 @@ def _cfg(tmp_path: Path, *, redact_sensitive_fields: bool = True) -> ApiConfig:
     )
 
 
-async def _bootstrap(tmp_path: Path, *, redact_sensitive_fields: bool = True):
+async def _bootstrap(
+    tmp_path: Path,
+    *,
+    redact_sensitive_fields: bool = True,
+    product_kinds: str = "network",
+):
     config = _cfg(tmp_path, redact_sensitive_fields=redact_sensitive_fields)
     app = create_app(config)
     async with app.state.engine.begin() as conn:
@@ -50,7 +55,7 @@ async def _bootstrap(tmp_path: Path, *, redact_sensitive_fields: bool = True):
                 id=cid,
                 name="N",
                 base_url="https://x",
-                product_kinds="network",
+                product_kinds=product_kinds,
                 credentials_blob=creds,
                 verify_tls=False,
                 is_default=True,
@@ -67,6 +72,59 @@ class _FakeClient:
 
     def __init__(self, raw: dict) -> None:
         self.raw = raw
+
+
+@pytest.mark.asyncio
+async def test_action_endpoint_enforces_confirmation_before_manager_interaction(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("UNIFI_API_DB_KEY", "k")
+    app, key, cid = await _bootstrap(tmp_path, product_kinds="access")
+
+    manager = MagicMock()
+    manager.list_doors = AsyncMock(return_value=[])
+    manager.apply_unlock_door = AsyncMock(return_value=True)
+    factory = MagicMock()
+    factory.get_domain_manager = AsyncMock(return_value=manager)
+    app.state.manager_factory = factory
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        read_response = await client.post(
+            "/v1/actions/access_list_doors",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"site": "default", "controller": cid, "args": {}, "confirm": False},
+        )
+        assert read_response.status_code == 200
+        assert read_response.json()["success"] is True
+        manager.list_doors.assert_awaited_once_with()
+
+        factory.get_domain_manager.reset_mock()
+        unconfirmed_response = await client.post(
+            "/v1/actions/access_unlock_door",
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "site": "default",
+                "controller": cid,
+                "args": {"door_id": "door-1", "duration": 2},
+                "confirm": False,
+            },
+        )
+        assert unconfirmed_response.status_code == 200
+        assert "requires confirm=true" in unconfirmed_response.json()["error"]
+        factory.get_domain_manager.assert_not_awaited()
+        manager.apply_unlock_door.assert_not_awaited()
+
+        confirmed_response = await client.post(
+            "/v1/actions/access_unlock_door",
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "site": "default",
+                "controller": cid,
+                "args": {"door_id": "door-1", "duration": 2},
+                "confirm": True,
+            },
+        )
+        assert confirmed_response.status_code == 200
+        assert confirmed_response.json()["success"] is True
+        manager.apply_unlock_door.assert_awaited_once_with(door_id="door-1", duration=2)
 
 
 @pytest.mark.asyncio

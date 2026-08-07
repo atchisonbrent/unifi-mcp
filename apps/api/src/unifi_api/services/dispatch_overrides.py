@@ -134,22 +134,6 @@ DISPATCH_OVERRIDES: dict[str, tuple[str, str]] = {
     "access_delete_visitor": ("visitor_manager", "apply_delete_visitor"),
 }
 
-
-CONFIRM_REQUIRED_TOOLS: frozenset[str] = frozenset(
-    {
-        # The manager now enforces the ordering invariants, but this action is
-        # still a live reorder operation. Keep the API action path aligned with
-        # the MCP tool's explicit confirmation contract.
-        "unifi_reorder_firewall_policies",
-        # These Protect capability actions dispatch directly to apply_* manager
-        # methods. Require the same explicit confirmation the MCP tools require.
-        "protect_update_chime",
-        "protect_update_sensor_settings",
-        "protect_update_viewer",
-    }
-)
-
-
 # Format: tool_name -> callable(args_dict) -> (positional_args, keyword_args)
 #
 # The default dispatcher invokes ``manager.method(**args)``. Tools registered

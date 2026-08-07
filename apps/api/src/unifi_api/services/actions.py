@@ -45,7 +45,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from unifi_core.redaction import redaction_marker_paths
 
 from unifi_api.services.dispatch_overrides import (
-    CONFIRM_REQUIRED_TOOLS,
     DISPATCH_ARG_TRANSLATORS,
     DISPATCH_OVERRIDES,
 )
@@ -56,6 +55,8 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_PRODUCTS: tuple[str, ...] = ("network", "protect", "access")
+_MUTATING_PERMISSION_ACTIONS: frozenset[str] = frozenset({"create", "update", "delete"})
+_READ_PERMISSION_ACTIONS: frozenset[str] = frozenset({"", "read"})
 INCLUDE_SENSITIVE_UNSUPPORTED_ERROR = (
     "include_sensitive is not supported; set UNIFI_API_REDACT_SENSITIVE_FIELDS=false or "
     "policy.response.redact_sensitive_fields=false to allow raw sensitive fields for this API surface."
@@ -242,6 +243,23 @@ def reset_dispatch_table_cache() -> None:
     _DISPATCH_TABLE = None
 
 
+def _classify_action(entry: ToolEntry) -> str:
+    """Return ``read`` or ``mutation`` from consistent manifest metadata.
+
+    The action endpoint invokes manager methods directly, bypassing the MCP
+    tool wrapper where confirmation normally lives. Both independent manifest
+    signals must therefore agree before dispatch is allowed.
+    """
+    if entry.permission_action in _MUTATING_PERMISSION_ACTIONS and entry.read_only_hint is False:
+        return "mutation"
+    if entry.permission_action in _READ_PERMISSION_ACTIONS and entry.read_only_hint is True:
+        return "read"
+    raise ValueError(
+        f"tool '{entry.name}' has invalid safety metadata "
+        f"(permission_action={entry.permission_action!r}, readOnlyHint={entry.read_only_hint!r})"
+    )
+
+
 async def dispatch_action(
     *,
     registry: ManifestRegistry,
@@ -282,7 +300,8 @@ async def dispatch_action(
             f"tool '{tool_name}' requires product '{entry.product}', controller supports {controller_products!r}"
         )
 
-    if not confirm and (entry.permission_action == "delete" or tool_name in CONFIRM_REQUIRED_TOOLS):
+    action_kind = _classify_action(entry)
+    if not confirm and action_kind == "mutation":
         raise ValueError(f"tool '{tool_name}' requires confirm=true")
 
     table = dispatch_table if dispatch_table is not None else _get_table()

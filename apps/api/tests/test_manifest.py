@@ -48,6 +48,7 @@ def test_parse_manifest_retains_permission_action() -> None:
                     "name": "access_delete_visitor",
                     "permission_category": "visitor",
                     "permission_action": "delete",
+                    "annotations": {"readOnlyHint": False},
                 }
             ],
         },
@@ -55,6 +56,7 @@ def test_parse_manifest_retains_permission_action() -> None:
     )
 
     assert entries["access_delete_visitor"].permission_action == "delete"
+    assert entries["access_delete_visitor"].read_only_hint is False
 
 
 def test_module_map_fallback_has_no_permission_action() -> None:
@@ -64,6 +66,38 @@ def test_module_map_fallback_has_no_permission_action() -> None:
     )
 
     assert entries["legacy_tool"].permission_action == ""
+    assert entries["legacy_tool"].read_only_hint is None
+
+
+@pytest.mark.parametrize(
+    ("annotations", "expected"),
+    [
+        ({"readOnlyHint": True}, True),
+        ({"readOnlyHint": False}, False),
+        ({}, None),
+        ({"readOnlyHint": "false"}, None),
+        (None, None),
+    ],
+)
+def test_parse_manifest_retains_only_boolean_read_only_hint(
+    annotations: object,
+    expected: bool | None,
+) -> None:
+    entries = _parse_manifest(
+        {
+            "tools": [
+                {
+                    "name": "test_tool",
+                    "permission_category": "test",
+                    "permission_action": "read",
+                    "annotations": annotations,
+                }
+            ]
+        },
+        "network",
+    )
+
+    assert entries["test_tool"].read_only_hint is expected
 
 
 def _some_known_network(reg) -> list[str]:

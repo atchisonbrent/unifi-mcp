@@ -58,8 +58,10 @@ class ToolEntry:
     """Resolved manifest entry for a single tool.
 
     ``manager`` and ``method`` are intentionally empty strings because the
-    manifests do not carry that information. ``permission_action`` is retained
-    so the action dispatcher can enforce confirmation before delete operations.
+    manifests do not carry that information. ``permission_action`` and
+    ``read_only_hint`` are retained together so the action dispatcher can
+    classify every entry as read-only or mutating and fail closed when the
+    manifest metadata is missing or contradictory.
     """
 
     name: str
@@ -68,6 +70,7 @@ class ToolEntry:
     manager: str
     method: str
     permission_action: str = ""
+    read_only_hint: bool | None = None
 
 
 class ManifestRegistry:
@@ -143,6 +146,12 @@ def _parse_manifest(data: Any, product: str) -> dict[str, ToolEntry]:
             permission_action = tool.get("permission_action")
             if not isinstance(permission_action, str):
                 permission_action = ""
+            annotations = tool.get("annotations")
+            read_only_hint: bool | None = None
+            if isinstance(annotations, dict):
+                raw_read_only_hint = annotations.get("readOnlyHint")
+                if isinstance(raw_read_only_hint, bool):
+                    read_only_hint = raw_read_only_hint
             entries[name] = ToolEntry(
                 name=name,
                 product=product,
@@ -150,6 +159,7 @@ def _parse_manifest(data: Any, product: str) -> dict[str, ToolEntry]:
                 manager="",
                 method="",
                 permission_action=permission_action,
+                read_only_hint=read_only_hint,
             )
         return entries
 
@@ -164,6 +174,7 @@ def _parse_manifest(data: Any, product: str) -> dict[str, ToolEntry]:
                 category=_category_from_module(module_path or ""),
                 manager="",
                 method="",
+                read_only_hint=None,
             )
     return entries
 

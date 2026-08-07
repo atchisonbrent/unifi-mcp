@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,9 +16,88 @@ from unifi_api.services.actions import (
 from unifi_api.services.manifest import ManifestRegistry, ToolEntry, ToolNotFound
 from unifi_core.redaction import REDACTED
 
+PRODUCTION_REGISTRY = ManifestRegistry.load_from_apps()
+
 
 def _registry_with(tool: ToolEntry) -> ManifestRegistry:
+    if tool.read_only_hint is None and PRODUCTION_REGISTRY.has(tool.name):
+        production_entry = PRODUCTION_REGISTRY.resolve(tool.name)
+        tool = replace(
+            tool,
+            permission_action=production_entry.permission_action,
+            read_only_hint=production_entry.read_only_hint,
+        )
     return ManifestRegistry({tool.name: tool})
+
+
+def _dispatchable_entries() -> list[tuple[str, ToolEntry]]:
+    table = build_dispatch_table()
+    return [
+        (tool_name, PRODUCTION_REGISTRY.resolve(tool_name))
+        for tool_name in PRODUCTION_REGISTRY.all_tools()
+        if tool_name in table
+    ]
+
+
+DISPATCHABLE_ENTRIES = _dispatchable_entries()
+DISPATCHABLE_MUTATIONS = [
+    (tool_name, entry)
+    for tool_name, entry in DISPATCHABLE_ENTRIES
+    if entry.permission_action in {"create", "update", "delete"}
+]
+
+
+def test_every_dispatchable_entry_has_consistent_safety_metadata() -> None:
+    assert DISPATCHABLE_ENTRIES
+    for tool_name, entry in DISPATCHABLE_ENTRIES:
+        if entry.permission_action in {"create", "update", "delete"}:
+            assert entry.read_only_hint is False, tool_name
+        else:
+            assert entry.permission_action in {"", "read"}, tool_name
+            assert entry.read_only_hint is True, tool_name
+
+
+def test_dispatchable_mutations_include_high_impact_sentinels() -> None:
+    mutation_names = {tool_name for tool_name, _entry in DISPATCHABLE_MUTATIONS}
+    assert {
+        "access_unlock_door",
+        "access_lock_door",
+        "access_reboot_device",
+        "access_create_credential",
+        "protect_reboot_camera",
+        "protect_toggle_recording",
+        "unifi_reboot_device",
+        "unifi_power_cycle_port",
+    } <= mutation_names
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "entry"),
+    DISPATCHABLE_MUTATIONS,
+    ids=[tool_name for tool_name, _entry in DISPATCHABLE_MUTATIONS],
+)
+async def test_every_dispatchable_mutation_requires_confirm(
+    tool_name: str,
+    entry: ToolEntry,
+) -> None:
+    factory = MagicMock()
+
+    with pytest.raises(ValueError, match=rf"tool '{tool_name}' requires confirm=true"):
+        await dispatch_action(
+            registry=_registry_with(entry),
+            factory=factory,
+            session=MagicMock(),
+            tool_name=tool_name,
+            controller_id="cid",
+            controller_products=[entry.product],
+            site="default",
+            args={},
+            confirm=False,
+            dispatch_table={},
+        )
+
+    factory.get_domain_manager.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -28,6 +108,8 @@ async def test_dispatch_capability_mismatch_raises() -> None:
         category="clients",
         manager="",
         method="",
+        permission_action="read",
+        read_only_hint=True,
     )
     registry = _registry_with(entry)
     factory = MagicMock()
@@ -73,6 +155,8 @@ async def test_dispatch_missing_table_entry_raises() -> None:
         category="clients",
         manager="",
         method="",
+        permission_action="read",
+        read_only_hint=True,
     )
     registry = _registry_with(entry)
     factory = MagicMock()
@@ -145,6 +229,183 @@ async def test_dispatch_happy_path_invokes_manager() -> None:
     domain_manager.get_clients.assert_awaited_once_with()
     # Same site -> no set_site call.
     conn_manager.set_site.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_read_action_reaches_manager_without_confirm() -> None:
+    entry = ToolEntry(
+        name="protect_list_cameras",
+        product="protect",
+        category="cameras",
+        manager="",
+        method="",
+        permission_action="read",
+        read_only_hint=True,
+    )
+    expected = {"success": True, "data": []}
+    manager = MagicMock()
+    manager.get_cameras = AsyncMock(return_value=expected)
+    factory = MagicMock()
+    factory.get_domain_manager = AsyncMock(return_value=manager)
+
+    result = await dispatch_action(
+        registry=_registry_with(entry),
+        factory=factory,
+        session=MagicMock(),
+        tool_name=entry.name,
+        controller_id="cid",
+        controller_products=[entry.product],
+        site="default",
+        args={"include_stats": False},
+        confirm=False,
+        dispatch_table={
+            entry.name: DispatchEntry(manager_attr="camera_manager", method="get_cameras"),
+        },
+    )
+
+    assert result is expected
+    manager.get_cameras.assert_awaited_once_with(include_stats=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission_action", ["create", "update", "delete"])
+async def test_confirmed_mutation_actions_reach_manager_unchanged(permission_action: str) -> None:
+    tool_name = f"access_{permission_action}_test_resource"
+    entry = ToolEntry(
+        name=tool_name,
+        product="access",
+        category="test",
+        manager="",
+        method="",
+        permission_action=permission_action,
+        read_only_hint=False,
+    )
+    expected = {"success": True, "action": permission_action}
+    manager = MagicMock()
+    manager.apply_action = AsyncMock(return_value=expected)
+    factory = MagicMock()
+    factory.get_domain_manager = AsyncMock(return_value=manager)
+    args = {"resource_id": "resource-1", "enabled": True}
+
+    result = await dispatch_action(
+        registry=_registry_with(entry),
+        factory=factory,
+        session=MagicMock(),
+        tool_name=tool_name,
+        controller_id="cid",
+        controller_products=[entry.product],
+        site="default",
+        args=args,
+        confirm=True,
+        dispatch_table={
+            tool_name: DispatchEntry(manager_attr="test_manager", method="apply_action"),
+        },
+    )
+
+    assert result is expected
+    manager.apply_action.assert_awaited_once_with(**args)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("permission_action", "read_only_hint"),
+    [
+        ("", None),
+        ("archive", False),
+        ("read", False),
+        ("update", True),
+    ],
+)
+async def test_ambiguous_or_conflicting_safety_metadata_fails_closed(
+    permission_action: str,
+    read_only_hint: bool | None,
+) -> None:
+    entry = ToolEntry(
+        name="access_test_action",
+        product="access",
+        category="test",
+        manager="",
+        method="",
+        permission_action=permission_action,
+        read_only_hint=read_only_hint,
+    )
+    factory = MagicMock()
+
+    with pytest.raises(ValueError, match="invalid safety metadata"):
+        await dispatch_action(
+            registry=_registry_with(entry),
+            factory=factory,
+            session=MagicMock(),
+            tool_name=entry.name,
+            controller_id="cid",
+            controller_products=[entry.product],
+            site="default",
+            args={},
+            confirm=False,
+            dispatch_table={},
+        )
+
+    factory.get_domain_manager.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_capability_mismatch_precedes_safety_metadata_validation() -> None:
+    entry = ToolEntry(
+        name="access_test_action",
+        product="access",
+        category="test",
+        manager="",
+        method="",
+        permission_action="",
+        read_only_hint=None,
+    )
+    factory = MagicMock()
+
+    with pytest.raises(CapabilityMismatch):
+        await dispatch_action(
+            registry=_registry_with(entry),
+            factory=factory,
+            session=MagicMock(),
+            tool_name=entry.name,
+            controller_id="cid",
+            controller_products=["network"],
+            site="default",
+            args={},
+            confirm=False,
+            dispatch_table={},
+        )
+
+    factory.get_domain_manager.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_confirmation_precedes_argument_validation() -> None:
+    entry = ToolEntry(
+        name="access_update_test_resource",
+        product="access",
+        category="test",
+        manager="",
+        method="",
+        permission_action="update",
+        read_only_hint=False,
+    )
+    factory = MagicMock()
+
+    with pytest.raises(ValueError, match="requires confirm=true"):
+        await dispatch_action(
+            registry=_registry_with(entry),
+            factory=factory,
+            session=MagicMock(),
+            tool_name=entry.name,
+            controller_id="cid",
+            controller_products=[entry.product],
+            site="default",
+            args={"include_sensitive": True},
+            confirm=False,
+            dispatch_table={},
+        )
+
+    factory.get_domain_manager.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -628,6 +889,7 @@ async def test_dispatch_delete_actions_require_confirm(tool_name: str, product: 
         manager="",
         method="",
         permission_action="delete",
+        read_only_hint=False,
     )
     registry = _registry_with(entry)
     factory = MagicMock()
@@ -658,6 +920,7 @@ async def test_dispatch_access_create_visitor_preserves_developer_fields() -> No
         manager="",
         method="",
         permission_action="create",
+        read_only_hint=False,
     )
     registry = _registry_with(entry)
     manager = MagicMock()
@@ -706,6 +969,7 @@ async def test_dispatch_confirmed_delete_reaches_manager() -> None:
         manager="",
         method="",
         permission_action="delete",
+        read_only_hint=False,
     )
     registry = _registry_with(entry)
     manager = MagicMock()
@@ -751,6 +1015,8 @@ async def test_dispatch_protect_capability_actions_require_confirm(tool_name: st
         category="devices",
         manager="",
         method="",
+        permission_action="update",
+        read_only_hint=False,
     )
     registry = _registry_with(entry)
     factory = MagicMock()
@@ -780,6 +1046,8 @@ async def test_dispatch_reorder_firewall_policies_requires_confirm() -> None:
         category="firewall",
         manager="",
         method="",
+        permission_action="update",
+        read_only_hint=False,
     )
     registry = _registry_with(entry)
     factory = MagicMock()

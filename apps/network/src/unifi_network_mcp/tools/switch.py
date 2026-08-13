@@ -9,7 +9,7 @@ and device management commands.
 
 import json
 import logging
-from typing import Annotated, Any, Dict, List
+from typing import Annotated, Any, Dict, List, Optional
 
 from mcp.types import ToolAnnotations
 from pydantic import Field, ValidationError
@@ -23,11 +23,18 @@ from unifi_core.network.models._actions import (
     SetSwitchPortProfileInput,
 )
 from unifi_core.network.models.switch import (
+    MUTABLE_FIELDS as PP_MUTABLE_FIELDS,
+)
+from unifi_core.network.models.switch import (
+    build_create_payload as pp_build_create_payload,
+)
+from unifi_core.network.models.switch import (
     from_controller as pp_from_controller,
 )
 from unifi_core.network.models.switch import (
     to_controller_update as pp_to_update,
 )
+from unifi_core.write_verification import format_tool_payload
 from unifi_network_mcp.runtime import server, switch_manager
 
 logger = logging.getLogger(__name__)
@@ -89,21 +96,55 @@ async def get_port_profile_details(
 @server.tool(
     name="unifi_create_port_profile",
     description="Create a new port profile. forward values: 'native' (access port), 'all' (trunk), "
-    "'customize' (selective trunk), 'disabled'. Requires confirmation.",
+    "or 'customize' (selective trunk). Port State (Active/Disabled) is a separate controller setting "
+    "that these port-profile tools do not currently expose. "
+    "tagged_vlan_mgmt is the access-vs-trunk control ('auto'/'block_all'/'custom'): the controller "
+    "rewrites forward to agree with it, so an access port needs forward='native' with "
+    "tagged_vlan_mgmt='block_all'. Port Mode in the UI maps to stp_edge_state + "
+    "stp_bpdu_guard_enabled + stp_uplink (Edge = 'enabled'/true/false). Requires confirmation.",
     permission_category="switch",
     permission_action="create",
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False),
 )
 async def create_port_profile(
     name: Annotated[str, Field(description="Profile name")],
-    forward: Annotated[
-        str, Field(description="Forward mode: 'native' (access), 'all' (trunk), 'customize', or 'disabled'")
-    ],
+    forward: Annotated[str, Field(description="Forward mode: 'native' (access), 'all' (trunk), or 'customize'")],
     native_networkconf_id: Annotated[str, Field(description="Network/VLAN ID for native (untagged) traffic")] = "",
+    tagged_vlan_mgmt: Annotated[
+        str,
+        Field(
+            description="Tagged VLAN Management — the access-vs-trunk control: "
+            "'auto' (allow all), 'block_all' (access port), 'custom'. "
+            "An access port needs forward='native' with 'block_all'"
+        ),
+    ] = "",
+    tagged_networkconf_ids: Annotated[
+        Optional[List[str]],
+        Field(description="Network IDs carried tagged when tagged_vlan_mgmt is 'custom'"),
+    ] = None,
+    excluded_networkconf_ids: Annotated[
+        Optional[List[str]],
+        Field(description="Network IDs excluded when tagged_vlan_mgmt is 'custom'"),
+    ] = None,
     voice_networkconf_id: Annotated[str, Field(description="Network/VLAN ID for voice traffic")] = "",
     isolation: Annotated[bool, Field(description="Enable port isolation (block inter-client traffic)")] = False,
     poe_mode: Annotated[str, Field(description="PoE mode: 'auto' or 'off'")] = "auto",
     stp_port_mode: Annotated[bool, Field(description="Enable STP on this port")] = True,
+    stp_edge_state: Annotated[
+        str,
+        Field(
+            description="STP edge state: 'enabled' for end-device (Edge) ports, 'disabled' for uplinks. "
+            "The UI's Port Mode control sets this with stp_bpdu_guard_enabled and stp_uplink"
+        ),
+    ] = "",
+    stp_bpdu_guard_enabled: Annotated[
+        Optional[bool],
+        Field(description="Shut the port if it receives a BPDU (Edge ports)"),
+    ] = None,
+    stp_uplink: Annotated[
+        Optional[bool],
+        Field(description="Treat the port as an STP uplink (Infrastructure ports)"),
+    ] = None,
     dot1x_ctrl: Annotated[
         str, Field(description="802.1X control: 'force_authorized', 'auto', 'force_unauthorized'")
     ] = "",
@@ -113,19 +154,22 @@ async def create_port_profile(
     ] = False,
 ) -> Dict[str, Any]:
     """Creates a new port profile."""
-    profile_data: Dict[str, Any] = {"name": name, "forward": forward}
-    if native_networkconf_id:
-        profile_data["native_networkconf_id"] = native_networkconf_id
-    if voice_networkconf_id:
-        profile_data["voice_networkconf_id"] = voice_networkconf_id
-    if isolation:
-        profile_data["isolation"] = isolation
-    if poe_mode != "auto":
-        profile_data["poe_mode"] = poe_mode
-    if not stp_port_mode:
-        profile_data["stp_port_mode"] = stp_port_mode
-    if dot1x_ctrl:
-        profile_data["dot1x_ctrl"] = dot1x_ctrl
+    profile_data = pp_build_create_payload(
+        name=name,
+        forward=forward,
+        native_networkconf_id=native_networkconf_id,
+        tagged_vlan_mgmt=tagged_vlan_mgmt,
+        tagged_networkconf_ids=tagged_networkconf_ids,
+        excluded_networkconf_ids=excluded_networkconf_ids,
+        voice_networkconf_id=voice_networkconf_id,
+        isolation=isolation,
+        poe_mode=poe_mode,
+        stp_port_mode=stp_port_mode,
+        stp_edge_state=stp_edge_state,
+        stp_bpdu_guard_enabled=stp_bpdu_guard_enabled,
+        stp_uplink=stp_uplink,
+        dot1x_ctrl=dot1x_ctrl,
+    )
 
     if not confirm:
         return create_preview(
@@ -135,14 +179,12 @@ async def create_port_profile(
         )
 
     try:
-        result = await switch_manager.create_port_profile(profile_data)
-        if result:
-            return {
-                "success": True,
-                "message": f"Port profile '{name}' created successfully.",
-                "profile": json.loads(json.dumps(result, default=str)),
-            }
-        return {"success": False, "error": f"Failed to create port profile '{name}'."}
+        write_result = await switch_manager.create_port_profile(profile_data)
+        return format_tool_payload(
+            write_result,
+            site=switch_manager._connection.site,
+            success_message=f"Port profile '{name}' created successfully.",
+        )
     except Exception as e:
         logger.error("Error creating port profile: %s", e, exc_info=True)
         return {"success": False, "error": f"Failed to create port profile: {e}"}
@@ -164,10 +206,15 @@ async def update_port_profile(
         Field(
             description="Dictionary of fields to update. Pass only the fields you want to change — "
             "current values are automatically preserved. "
-            "Allowed keys: name, forward ('all'/'native'/'customize'/'disabled'), "
-            "native_networkconf_id, voice_networkconf_id, isolation (bool), "
+            "Allowed keys: name, forward ('all'/'native'/'customize'), "
+            "tagged_vlan_mgmt ('auto'/'block_all'/'custom'), native_networkconf_id, "
+            "tagged_networkconf_ids (list), excluded_networkconf_ids (list), "
+            "voice_networkconf_id, isolation (bool), "
             "poe_mode ('auto'/'off'/'pasv24'/'passthrough'), stp_port_mode (bool), "
-            "dot1x_ctrl ('force_authorized'/'auto'/'force_unauthorized'/'mac_based'/'multi_host')"
+            "stp_edge_state ('enabled'/'disabled'), stp_bpdu_guard_enabled (bool), stp_uplink (bool), "
+            "dot1x_ctrl ('force_authorized'/'auto'/'force_unauthorized'/'mac_based'/'multi_host'). "
+            "The controller rewrites forward to agree with tagged_vlan_mgmt, so change them together. "
+            "Port State (Active/Disabled) is a separate controller setting that this tool does not expose"
         ),
     ],
     confirm: Annotated[
@@ -182,7 +229,21 @@ async def update_port_profile(
         return {"success": False, "error": "profile_data cannot be empty"}
 
     validated_data = pp_to_update(profile_data)
+    # unifi_get_port_profile_details returns the controller's full raw object, so
+    # callers routinely round-trip keys this tool cannot write. Name them rather
+    # than dropping them silently.
+    ignored_fields = sorted(k for k in profile_data if k not in PP_MUTABLE_FIELDS)
     if not validated_data:
+        if ignored_fields:
+            return {
+                "success": False,
+                "error": (
+                    f"The following fields are not supported by unifi_update_port_profile: "
+                    f"{', '.join(ignored_fields)}. "
+                    "unifi_get_port_profile_details returns the controller's full raw object, "
+                    "which includes fields this tool cannot write."
+                ),
+            }
         return {"success": False, "error": "No valid mutable fields provided for update."}
 
     if not confirm:
@@ -192,14 +253,28 @@ async def update_port_profile(
             resource_name=profile_id,
             current_state={},
             updates=validated_data,
+            warnings=(
+                [
+                    "The following fields are not writable through this tool and will be ignored: "
+                    + ", ".join(ignored_fields)
+                    + "."
+                ]
+                if ignored_fields
+                else None
+            ),
         )
 
     try:
-        merged = await switch_manager.update_port_profile(profile_id, validated_data)
-        return {
-            "success": True,
-            "message": f"Port profile '{merged.get('name', profile_id)}' updated successfully.",
-        }
+        write_result = await switch_manager.update_port_profile(profile_id, validated_data)
+        result = format_tool_payload(
+            write_result,
+            site=switch_manager._connection.site,
+            success_message=f"Port profile '{profile_id}' updated successfully.",
+        )
+        result["profile_id"] = profile_id
+        if ignored_fields:
+            result["ignored_fields"] = ignored_fields
+        return result
     except UniFiNotFoundError as e:
         return {"success": False, "error": str(e)}
     except Exception as e:

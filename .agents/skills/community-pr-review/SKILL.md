@@ -324,6 +324,10 @@ confirm the fix reaches production by running the plugin after the release tag i
 
 **Gotcha — HTTP 401 on uiprotect bootstrap path is benign noise.** Live smoke runs against a controller with Protect enabled emit HTTP 401 on the uiprotect bootstrap path during library startup. This is the library's startup probe and is expected — not an authentication failure. Do not block merge or file a bug on a 401 from this specific path.
 
+**Gotcha — live_smoke.py report JSON has no response payloads; it cannot verify field-population fixes.** `scripts/live_smoke.py` writes only per-tool summaries (count, bytes, duration, status) to `live-smoke-results/*.json` — never the actual response payload. When a PR changes what fields get populated in a response (e.g. populating event `mac`/`ip`/`msg` from v2 system-log records), harness "ok" status proves nothing about the fix. Write a small in-process script that calls the tool directly and diffs the payload against a `git checkout origin/main` run before/after the change.
+
+**Gotcha — `make pre-commit` / bare `uv lock` or `uv sync` silently drop workspace deps.** Running `make pre-commit`, or `uv lock`/`uv sync` without flags, re-syncs the root `.venv` without the full workspace package set — dropping deps like `mcp`. The next `uv run python scripts/live_smoke.py` then dies with `ModuleNotFoundError: No module named 'mcp'`. Run `uv sync --all-packages` before any `scripts/live_smoke.py` invocation that follows a `make` target or a lock/sync operation.
+
 ### API Family Boundary Check (V2 vs. Integration)
 
 **Target:** Any PR that adds or modifies tools exposing UniFi API identifiers.

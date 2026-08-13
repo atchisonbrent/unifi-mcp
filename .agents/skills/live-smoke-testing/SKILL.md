@@ -83,6 +83,10 @@ Before any live run, ensure:
    ```bash
    uv run --all-packages python scripts/live_smoke.py --server network --phase safe
    ```
+   **`mcp` can also silently vanish from the root `.venv` after `make pre-commit`, `uv lock`,
+   or bare `uv sync`** — any of these run without `--all-packages` and re-resolve the root env
+   without the workspace-shared dependency. If a previously-working smoke run suddenly hits
+   `ModuleNotFoundError: mcp`, re-run `uv sync --all-packages` before assuming a code regression.
 
 ## Procedure 0: PRE-MERGE BLOCKING GATE — API Response Parsing Changes
 
@@ -228,6 +232,12 @@ run destructive smoke against a production resource. If a dedicated test resourc
 guaranteed (e.g., hardware-bound resources like camera channels), add the tool to
 `RISKY_OPERATION_NAMES` to exclude it from automated phases and require explicit human approval.
 
+**VLAN reserved-range bug:** the disposable-network VLAN picker used for approved-phase
+lifecycle testing selected a controller-reserved VLAN (>=4010), causing the lifecycle create to
+fail against real hardware even though the harness logic was correct. Fix: bound the VLAN scan
+range strictly below 4000 when generating disposable test VLANs — controllers reserve the
+upper range internally and will reject or silently reassign IDs at/above 4010.
+
 ## Procedure D: Interpret Artifacts in `live-smoke-results/`
 
 Each run writes one JSON file per server, stamped with a timestamp:
@@ -270,6 +280,14 @@ The file contains a `SmokeReport` serialized as JSON:
 example, an Access proxy returning HTTP 200 with an auth-failure body: `status` is `"ok"`
 but `success` is `false` or `summary` contains no usable data. Always inspect `summary`
 content and `pending_approval`, not just the overall status counts.
+
+**`live-smoke-results/*.json` stores only per-tool summaries, not full response payloads —
+a `status: "ok"` run proves nothing when a PR changes which fields get populated.** The
+artifact's `summary` field is a truncated/derived view, not the raw API response, so it
+cannot confirm that a specific field was newly populated or correctly filtered. To verify
+response-shape changes, run an in-process one-shot probe script that prints the raw payload,
+and diff it against the same probe run on `git checkout origin/main` for a before/after
+comparison — the smoke artifact alone is not sufficient evidence for field-level changes.
 
 **Confirmed API contract failure patterns** (discovered through live testing; mocks did not
 catch any of these):

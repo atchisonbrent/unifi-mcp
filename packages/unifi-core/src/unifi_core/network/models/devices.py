@@ -9,6 +9,8 @@ Mirrors the Strawberry types in
 Factory helpers:
 - ``from_controller``              — normalise raw dict → Device
 - ``radio_from_controller``        — normalise raw radio entry dict → DeviceRadio
+- ``normalize_radio_channel``      — controller channel value → canonical int (0 = auto)
+- ``normalize_radio_ht``           — controller width value → canonical MHz string
 - ``to_controller_update``         — filter a partial Device dict to mutable keys
 - ``radio_to_controller_update``   — filter a partial radio dict to mutable keys
 
@@ -17,9 +19,12 @@ Per-class MUTABLE_FIELDS constants drive the cross-layer symmetry test.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Device — top-level device (mutable: name only; other mutations are actions)
@@ -84,7 +89,7 @@ class Device(BaseModel):
 
 
 class DeviceRadio(BaseModel):
-    """Canonical per-radio entry model for access point radio updates.
+    """Canonical per-radio entry model for device radio updates.
 
     Mutable fields mirror the DEVICE_RADIO_UPDATE_SCHEMA.  The model is used
     to type-check and filter radio update dicts before passing them to the
@@ -231,14 +236,43 @@ def to_controller_update(fields: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def normalize_radio_channel(value: Any) -> Optional[int]:
+    """Normalise a controller channel value to the canonical int form.
+
+    APs report an int; gateways report the string ``"auto"`` when the radio
+    selects its own channel. ``"auto"`` maps to 0 — the convention the update
+    schema already documents ("0 for auto").
+    """
+    if value == "auto":
+        return 0
+    if isinstance(value, str):
+        if value.isdigit():
+            return int(value)
+        logger.warning("Unrecognised radio channel value %r dropped from read output", value)
+        return None
+    return value
+
+
+def normalize_radio_ht(value: Any) -> Optional[str]:
+    """Normalise a controller channel-width value to the canonical MHz string.
+
+    APs report a string (``"20"``); gateways report an int (``160``). The
+    canonical form is the string, matching VALID_HT_VALUES and the update
+    schema.
+    """
+    if value is None:
+        return None
+    return str(value)
+
+
 def radio_from_controller(raw: Any) -> DeviceRadio:
     """Build a DeviceRadio (single radio entry) from a controller radio_table row."""
     return DeviceRadio(
         radio=_get(raw, "radio"),
         tx_power_mode=_get(raw, "tx_power_mode"),
         tx_power=_get(raw, "tx_power"),
-        channel=_get(raw, "channel"),
-        ht=_get(raw, "ht"),
+        channel=normalize_radio_channel(_get(raw, "channel")),
+        ht=normalize_radio_ht(_get(raw, "ht")),
         min_rssi_enabled=_get(raw, "min_rssi_enabled"),
         min_rssi=_get(raw, "min_rssi"),
         assisted_roaming_enabled=_get(raw, "assisted_roaming_enabled"),

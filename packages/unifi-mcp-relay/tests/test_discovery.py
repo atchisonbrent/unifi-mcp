@@ -405,6 +405,198 @@ async def test_discover_tools_eager_mode_fallback(mock_mcp_client):
 
 
 @pytest.mark.asyncio
+async def test_discover_tools_warmed_lazy_mode_still_uses_full_index(mock_mcp_client):
+    """A partially loaded lazy server must retain its full indexed catalog."""
+
+    def route_request(method, params=None):
+        if method == "initialize":
+            return {
+                "protocolVersion": LEGACY_MCP_PROTOCOL_REVISION,
+                "serverInfo": {"name": "unifi-network-mcp", "version": "1.0.0"},
+            }
+        if method == "tools/list":
+            return {
+                "tools": [
+                    {"name": "unifi_tool_index", "description": "Index", "inputSchema": {"type": "object"}},
+                    {"name": "unifi_execute", "description": "Execute", "inputSchema": {"type": "object"}},
+                    {"name": "unifi_batch", "description": "Batch", "inputSchema": {"type": "object"}},
+                    {"name": "unifi_batch_status", "description": "Status", "inputSchema": {"type": "object"}},
+                    {"name": "unifi_load_tools", "description": "Load", "inputSchema": {"type": "object"}},
+                    {
+                        "name": "unifi_list_clients",
+                        "description": "Already loaded directly",
+                        "inputSchema": {"type": "object"},
+                    },
+                ]
+            }
+        if method == "tools/call":
+            assert params == {"name": "unifi_tool_index", "arguments": {"include_schemas": True}}
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": __import__("json").dumps(
+                            {
+                                "tools": [
+                                    {
+                                        "name": "unifi_list_clients",
+                                        "description": "List clients",
+                                        "schema": {"input": {"type": "object"}},
+                                        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+                                    },
+                                    {
+                                        "name": "unifi_list_devices",
+                                        "description": "List devices",
+                                        "schema": {"input": {"type": "object"}},
+                                        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+                                    },
+                                ]
+                            }
+                        ),
+                    }
+                ]
+            }
+        raise AssertionError(f"Unexpected call: {method}")
+
+    mock_cls, mock_instance = mock_mcp_client(route_request)
+    with patch("unifi_mcp_relay.discovery.McpHttpClient", mock_cls):
+        from unifi_mcp_relay.discovery import discover_tools
+
+        result = await discover_tools("http://localhost:3000")
+
+    assert result is not None
+    assert result.lazy_load_tool_name == "unifi_load_tools"
+    assert [call.args[0] for call in mock_instance.request.await_args_list] == [
+        "initialize",
+        "tools/list",
+        "tools/call",
+    ]
+    assert {tool.name for tool in result.tools} == {"unifi_list_clients", "unifi_list_devices"}
+    assert all(tool.annotations == {"readOnlyHint": True, "openWorldHint": False} for tool in result.tools)
+
+
+@pytest.mark.asyncio
+async def test_discover_tools_overlays_direct_annotations_missing_from_legacy_index(mock_mcp_client):
+    """A current relay must preserve annotations from older eager servers."""
+
+    def route_request(method, params=None):
+        if method == "initialize":
+            return {
+                "protocolVersion": LEGACY_MCP_PROTOCOL_REVISION,
+                "serverInfo": {"name": "unifi-network-mcp", "version": "0.27.0"},
+            }
+        if method == "tools/list":
+            return {
+                "tools": [
+                    {"name": "unifi_tool_index", "description": "Index", "inputSchema": {"type": "object"}},
+                    {
+                        "name": "unifi_list_clients",
+                        "title": "List Clients",
+                        "description": "Direct eager description",
+                        "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}},
+                        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+                    },
+                ]
+            }
+        if method == "tools/call":
+            assert params == {"name": "unifi_tool_index", "arguments": {"include_schemas": True}}
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": __import__("json").dumps(
+                            {
+                                "tools": [
+                                    {
+                                        "name": "unifi_list_clients",
+                                        "description": "Indexed description",
+                                        "schema": {"input": {"type": "object"}},
+                                    }
+                                ]
+                            }
+                        ),
+                    }
+                ]
+            }
+        raise AssertionError(f"Unexpected call: {method}")
+
+    mock_cls, _ = mock_mcp_client(route_request)
+    with patch("unifi_mcp_relay.discovery.McpHttpClient", mock_cls):
+        from unifi_mcp_relay.discovery import discover_tools
+
+        result = await discover_tools("http://localhost:3000")
+
+    assert result is not None
+    assert [tool.name for tool in result.tools] == ["unifi_list_clients"]
+    tool = result.tools[0]
+    assert tool.description == "Indexed description"
+    assert tool.title == "List Clients"
+    assert tool.input_schema == {"type": "object"}
+    assert tool.annotations == {"readOnlyHint": True, "openWorldHint": False}
+
+
+@pytest.mark.asyncio
+async def test_discover_tools_meta_only_mode_calls_index_without_load_tools(mock_mcp_client):
+    """Four canonical meta-tools without load-tools is meta-only, not eager."""
+
+    def route_request(method, params=None):
+        if method == "initialize":
+            return {
+                "protocolVersion": LEGACY_MCP_PROTOCOL_REVISION,
+                "serverInfo": {"name": "unifi-network-mcp", "version": "1.0.0"},
+            }
+        if method == "tools/list":
+            return {
+                "tools": [
+                    {"name": name, "description": name, "inputSchema": {"type": "object"}}
+                    for name in (
+                        "unifi_tool_index",
+                        "unifi_execute",
+                        "unifi_batch",
+                        "unifi_batch_status",
+                    )
+                ]
+            }
+        if method == "tools/call":
+            assert params == {"name": "unifi_tool_index", "arguments": {"include_schemas": True}}
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": __import__("json").dumps(
+                            {
+                                "tools": [
+                                    {
+                                        "name": "unifi_list_clients",
+                                        "description": "List clients",
+                                        "schema": {"input": {"type": "object"}},
+                                        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+                                    }
+                                ]
+                            }
+                        ),
+                    }
+                ]
+            }
+        raise AssertionError(f"Unexpected call: {method}")
+
+    mock_cls, mock_instance = mock_mcp_client(route_request)
+    with patch("unifi_mcp_relay.discovery.McpHttpClient", mock_cls):
+        from unifi_mcp_relay.discovery import discover_tools
+
+        result = await discover_tools("http://localhost:3000")
+
+    assert result is not None
+    assert result.lazy_load_tool_name is None
+    assert [call.args[0] for call in mock_instance.request.await_args_list] == [
+        "initialize",
+        "tools/list",
+        "tools/call",
+    ]
+    assert result.tools[0].annotations == {"readOnlyHint": True, "openWorldHint": False}
+
+
+@pytest.mark.asyncio
 async def test_discover_all_concurrent(mock_mcp_client):
     """discover_all runs multiple servers concurrently and collects results."""
 

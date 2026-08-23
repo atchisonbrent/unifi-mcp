@@ -27,18 +27,34 @@ from unifi_api.routes.resources._common import (
     require_capability,
     resolve_controller,
 )
-from unifi_api.services.pagination import Cursor, InvalidCursor, paginate
+from unifi_api.services.access_event_key import (
+    InvalidAccessEventCursor,
+    event_sort_key,
+    paginate_access_events,
+)
 
 router = APIRouter()
 
 
 def _event_key(obj) -> tuple:
-    """Sort by (timestamp, id) — newest first via the manifest's
-    ``sort_default = "timestamp:desc"``. paginate() sorts ascending; the
-    user-facing direction is captured in the serializer metadata.
+    """Sort by the canonical Access event key — newest first via the manifest's
+    ``sort_default = "timestamp:desc"``.
+
+    Uses the same key as the GraphQL resolver. Reading ``timestamp`` straight
+    off the raw row put a bare ``0`` next to a string for system-log rows,
+    which raises ``TypeError`` inside ``sorted()`` as soon as the two shapes
+    meet and takes ``GET /access/events`` down.
     """
-    raw = obj if isinstance(obj, dict) else getattr(obj, "raw", {}) or {}
-    return (raw.get("timestamp") or raw.get("time") or 0, raw.get("id") or "")
+    # Do NOT fall back to {}: that keyed every non-dict, non-.raw row to the
+    # same constant, so paginate()'s strict `<` window dropped all of them from
+    # page 2 - the exact collapse this key exists to prevent. Passing the object
+    # through lets event_sort_key read it via getattr, matching the GraphQL side.
+    raw = obj
+    if not isinstance(obj, dict):
+        wrapped = getattr(obj, "raw", None)
+        if isinstance(wrapped, dict):
+            raw = wrapped
+    return event_sort_key(raw)
 
 
 async def _maybe_set_site(cm, site_id: str) -> None:
@@ -76,19 +92,15 @@ async def list_access_events(
         await _maybe_set_site(cm, site_id)
         all_events = await mgr.list_events(limit=max(limit, 100))
 
-    cursor_obj = None
-    if cursor:
-        try:
-            cursor_obj = Cursor.decode(cursor)
-        except InvalidCursor:
-            raise HTTPException(status_code=400, detail="invalid cursor")
-
-    page, next_cursor = paginate(
-        list(all_events),
-        limit=limit,
-        cursor=cursor_obj,
-        key_fn=_event_key,
-    )
+    try:
+        page, next_cursor = paginate_access_events(
+            list(all_events),
+            limit=limit,
+            cursor=cursor,
+            key_fn=_event_key,
+        )
+    except InvalidAccessEventCursor as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     type_registry = request.app.state.type_registry
     tool_type = type_registry.lookup_tool("access_list_events")
@@ -103,7 +115,7 @@ async def list_access_events(
         hint = registry.render_hint_for_tool("access_list_events")
     return {
         "items": items,
-        "next_cursor": next_cursor.encode() if next_cursor else None,
+        "next_cursor": next_cursor,
         "render_hint": hint,
     }
 

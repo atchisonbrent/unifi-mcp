@@ -375,9 +375,11 @@ safe-outputs:
         const singularTextualIssueReferencePattern =
           /\bissue\s*(?:(?:number|num(?:ber)?|no)\.?\s*)?:?\s*#?\s*(\d+)\b/gi;
         const pluralTextualIssueReferencePattern = /\bissues\s*:?\s*#\s*(\d+)\b/gi;
+        const textualPullRequestReferencePattern =
+          /\b(?:PRs?|pull[\s-]+requests?)\s*(?:(?:number|num(?:ber)?|no)\.?\s*)?:?\s*#?\s*\d+\b/gi;
         const ghIssueReferencePattern = /\bGH\s*-\s*(\d+)\b/gi;
-        const issuePathReferencePattern =
-          /(^|[^A-Za-z0-9_.\/-])(?:(?:(?:\/\/)?(?:www\.)?github\.com\/)|(?:\/|(?:\.\.?\/)+))?([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues\/(\d+)\b/gi;
+        const githubItemPathReferencePattern =
+          /(^|[^A-Za-z0-9_.\/-])(?:(?:(?:\/\/)?(?:www\.)?github\.com\/)|(?:\/|(?:\.\.?\/)+))?([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/(issues|pull)\/(\d+)\b/gi;
         const markdownLinkPattern = /\[[^\]]+\]\s*(?:\([^)]*\)|\[[^\]]*\])/g;
         const htmlLinkPattern = /<(?:a\s|[^>]+\shref\s*=)/gi;
         const mentionPattern = /(^|[^A-Za-z0-9_])@[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\b/g;
@@ -611,18 +613,24 @@ safe-outputs:
             referencedIssueNumbers.add(Number(match[1]));
           }
           pluralTextualIssueReferencePattern.lastIndex = 0;
+          if (textualPullRequestReferencePattern.test(normalizedReferenceValue)) {
+            violations.push("numbered pull-request reference is not allowed");
+          }
+          textualPullRequestReferencePattern.lastIndex = 0;
           for (const match of normalizedReferenceValue.matchAll(ghIssueReferencePattern)) {
             referencedIssueNumbers.add(Number(match[1]));
           }
           ghIssueReferencePattern.lastIndex = 0;
-          for (const match of normalizedReferenceValue.matchAll(issuePathReferencePattern)) {
+          for (const match of normalizedReferenceValue.matchAll(githubItemPathReferencePattern)) {
             if (match[2].toLowerCase() !== "sirkirby" || match[3].toLowerCase() !== "unifi-mcp") {
               violations.push("cross-repository reference");
+            } else if (match[4].toLowerCase() === "pull") {
+              violations.push("numbered pull-request reference is not allowed");
             } else {
-              referencedIssueNumbers.add(Number(match[4]));
+              referencedIssueNumbers.add(Number(match[5]));
             }
           }
-          issuePathReferencePattern.lastIndex = 0;
+          githubItemPathReferencePattern.lastIndex = 0;
           for (const match of normalizedReferenceValue.matchAll(urlPattern)) {
             const candidate = match[0].replace(/[),.;!?]+$/, "");
             try {
@@ -638,12 +646,16 @@ safe-outputs:
               ) {
                 violations.push("URL outside the canonical repository");
               } else {
-                const issuePathMatch = normalizedPath.match(
-                  /^\/sirkirby\/unifi-mcp\/issues\/(\d+)$/,
-                );
-                if (issuePathMatch) {
-                  referencedIssueNumbers.add(Number(issuePathMatch[1]));
+              const githubItemPathMatch = normalizedPath.match(
+                /^\/sirkirby\/unifi-mcp\/(issues|pull)\/(\d+)$/,
+              );
+              if (githubItemPathMatch) {
+                if (githubItemPathMatch[1] === "pull") {
+                  violations.push("numbered pull-request reference is not allowed");
+                } else {
+                  referencedIssueNumbers.add(Number(githubItemPathMatch[2]));
                 }
+              }
               }
             } catch {
               violations.push("malformed URL");
@@ -675,10 +687,14 @@ safe-outputs:
           targetNumber,
           ...duplicateContext.candidates.map((candidate) => candidate.number),
         ]);
-        for (const issueNumber of referencedIssueNumbers) {
-          if (!trustedIssueNumbers.has(issueNumber)) {
-            violations.push("issue reference outside trusted candidate context");
-          }
+        const untrustedIssueNumbers = [...referencedIssueNumbers]
+          .filter((issueNumber) => !trustedIssueNumbers.has(issueNumber))
+          .sort((left, right) => left - right);
+        if (untrustedIssueNumbers.length > 0) {
+          violations.push(
+            "issue reference outside trusted candidate context: " +
+              untrustedIssueNumbers.map((issueNumber) => "#" + issueNumber).join(", ")
+          );
         }
         const semanticText = semanticStrings.join("\n");
         const sensitiveStopMessage = "Sensitive intake stop: Maintainer attention is required.";
@@ -884,6 +900,11 @@ ${{ needs.trusted_duplicate_research.outputs.context }}
    Use only one of the three literal verdicts. The line is a machine-checked Stage A
    assessment, not proof that `issue_read` succeeded; a human must still verify tool-use
    evidence. Reference no issue number outside the trusted target and candidate set.
+   Before calling a safe-output tool, scan every free-form output string for numeric
+   GitHub references. Only the trusted target issue number and candidate issue numbers
+   may remain. Do not emit any numbered pull-request reference, including singular,
+   plural, spaced, hyphenated, URL, or path forms. Paraphrase supporting references as
+   `a prior merged change` or `a prior report` without their numbers.
 6. During normal triage, when no candidates are present, include the one exact statement
    matching the trusted context:
    - complete scan: `Lexical result: No candidate met the deterministic threshold; duplicate status remains unknown.`

@@ -1,26 +1,30 @@
 ---
-name: Community issue triage (inert Stage B readiness)
-description: Manually dispatched readiness workflow with trusted issue evidence, staged comments, and one human-reviewed needs-info suggestion.
+name: Community issue triage
+description: Automatically provide a bounded first-pass triage response on qualifying community issue intake.
 
 on:
-  workflow_dispatch:
-    inputs:
-      issue_number:
-        description: Existing issue number to evaluate
-        required: true
-        type: number
-      retention_verified:
-        description: Confirm repository Actions artifact and log retention is set to one day
-        required: true
-        default: false
-        type: boolean
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created]
+  roles: all
+  reaction: none
+  status-comment: false
+  stale-check: full
 
 permissions:
   actions: read
   contents: read
 
 strict: true
-engine: copilot
+engine:
+  id: copilot
+  # Only accepted agent jobs enter this FIFO queue. Public issue events are first
+  # filtered by the per-issue ingress and per-reporter qualifying gates below.
+  concurrency:
+    group: community-issue-triage-agent
+    cancel-in-progress: false
+    queue: max
 checkout: false
 sandbox:
   agent:
@@ -32,18 +36,283 @@ network:
   allowed: [github]
 
 timeout-minutes: 10
-concurrency:
-  group: community-issue-triage
-  cancel-in-progress: false
-  queue: single
 max-ai-credits: 75
-max-daily-ai-credits: -1
+max-daily-ai-credits: 150
 
 jobs:
+  activation:
+    needs: [intake_gate, qualifying_rate_gate]
+    if: ${{ needs.intake_gate.outputs.eligible == 'true' && needs.qualifying_rate_gate.outputs.allowed == 'true' }}
+
+  intake_gate:
+    name: Qualifying community intake gate
+    # Reject public PR comments, bots, closed issues, and non-reporters from the
+    # event payload before a runner or GitHub API request is allocated. The
+    # checked-out contract repeats these checks against current trusted data.
+    if: github.event.issue.pull_request == null && github.event.issue.state == 'open' && github.event.issue.user.type != 'Bot' && github.actor == github.event.issue.user.login && (github.event_name == 'issues' || (github.event_name == 'issue_comment' && github.event.comment.user.login == github.actor))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      eligible: ${{ steps.gate.outputs.eligible }}
+      target_number: ${{ steps.gate.outputs.target_number }}
+      run_kind: ${{ steps.gate.outputs.run_kind }}
+      continuation_count: ${{ steps.gate.outputs.continuation_count }}
+      initial_marker_count: ${{ steps.gate.outputs.initial_marker_count }}
+      needs_info_present: ${{ steps.gate.outputs.needs_info_present }}
+      trigger_json: ${{ steps.gate.outputs.trigger_json }}
+    steps:
+      - name: Check out the immutable eligibility contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Evaluate the trusted intake event
+        id: gate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_ACTOR: ${{ github.actor }}
+          TARGET_NUMBER: ${{ github.event.issue.number }}
+          EVENT_COMMENT_ID: ${{ github.event.comment.id }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const path = require("path");
+            const {pathToFileURL} = require("url");
+            const contract = await import(
+              pathToFileURL(
+                path.join(
+                  process.env.GITHUB_WORKSPACE,
+                  ".github/scripts/community_issue_triage_contract.mjs",
+                ),
+              ).href
+            );
+            const targetNumber = Number(process.env.TARGET_NUMBER);
+            if (!Number.isSafeInteger(targetNumber) || targetNumber < 1) {
+              throw new Error("qualifying intake target is invalid");
+            }
+            const issueResponse = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: targetNumber,
+            });
+            const request = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: targetNumber,
+              per_page: 100,
+              page: 1,
+            };
+            const commentsResponse = await github.rest.issues.listComments(request);
+            if (!Array.isArray(commentsResponse.data)) {
+              throw new Error("GitHub returned an invalid issue comment collection");
+            }
+            if (commentsResponse.data.length === 100) {
+              const overflow = await github.rest.issues.listComments({...request, page: 2});
+              if (!Array.isArray(overflow.data) || overflow.data.length > 0) {
+                throw new Error("issue comment collection exceeds the trusted bound");
+              }
+            }
+            const timelineRequest = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: targetNumber,
+              per_page: 100,
+              page: 1,
+            };
+            const timelineResponse = await github.rest.issues.listEventsForTimeline(timelineRequest);
+            if (!Array.isArray(timelineResponse.data)) {
+              throw new Error("GitHub returned an invalid issue timeline event collection");
+            }
+            if (timelineResponse.data.length === 100) {
+              const overflow = await github.rest.issues.listEventsForTimeline({...timelineRequest, page: 2});
+              if (!Array.isArray(overflow.data) || overflow.data.length > 0) {
+                throw new Error("issue timeline event collection exceeds the trusted bound");
+              }
+            }
+            let eventComment = null;
+            if (process.env.EVENT_NAME === "issue_comment") {
+              const commentId = Number(process.env.EVENT_COMMENT_ID);
+              if (!Number.isSafeInteger(commentId) || commentId < 1) {
+                throw new Error("triggering issue comment ID is invalid");
+              }
+              const commentResponse = await github.rest.issues.getComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: commentId,
+              });
+              eventComment = commentResponse.data;
+            }
+            const result = contract.evaluateIntakeEligibility({
+              eventName: process.env.EVENT_NAME,
+              action: process.env.EVENT_ACTION,
+              actor: process.env.EVENT_ACTOR,
+              issue: issueResponse.data,
+              eventComment,
+              comments: commentsResponse.data,
+              timelineEvents: timelineResponse.data,
+            });
+            core.setOutput("eligible", String(result.eligible));
+            core.setOutput("target_number", String(result.target_number));
+            core.setOutput("run_kind", result.run_kind || "");
+            core.setOutput("continuation_count", String(result.continuation_count));
+            core.setOutput("initial_marker_count", String(result.initial_marker_count));
+            core.setOutput("needs_info_present", String(result.needs_info_present));
+            core.setOutput("trigger_json", contract.canonicalStringify(result.trigger));
+  qualifying_rate_gate:
+    name: Qualifying reporter rate gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [intake_gate]
+    if: ${{ needs.intake_gate.outputs.eligible == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+    concurrency:
+      # Eligibility is already true before this job queues. Serialize only a
+      # reporter's own receipt check+reservation so two targets from that reporter
+      # cannot race, without allowing them to displace another reporter's run.
+      group: community-issue-triage-reporter-${{ github.actor }}
+      cancel-in-progress: false
+      queue: max
+    outputs:
+      allowed: ${{ steps.rate.outputs.allowed }}
+    steps:
+      - name: Enforce one qualifying intake per reporter every three hours
+        id: rate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            core.setOutput("allowed", "false");
+            const currentRunId = Number(context.runId);
+            const actor = process.env.GITHUB_ACTOR;
+            if (!Number.isSafeInteger(currentRunId) || currentRunId < 1) {
+              throw new Error("qualifying rate gate run ID is invalid");
+            }
+            if (typeof actor !== "string" || actor === "") {
+              throw new Error("qualifying rate gate actor is missing");
+            }
+            const current = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: currentRunId,
+            });
+            const workflowId = current.data?.workflow_id;
+            if (!Number.isSafeInteger(workflowId) || workflowId < 1) {
+              throw new Error("could not resolve the current workflow ID for the qualifying rate gate");
+            }
+            const windowMs = 180 * 60 * 1000;
+            const currentCreatedAt = Date.parse(current.data?.created_at || "");
+            const observedAt = Date.now();
+            if (!Number.isFinite(currentCreatedAt) || currentCreatedAt > observedAt + 5 * 60 * 1000) {
+              throw new Error("current workflow run timestamp is invalid");
+            }
+            if (observedAt - currentCreatedAt > windowMs) {
+              core.notice(`Qualifying intake run ${currentRunId} exceeded the trusted queue-age window.`);
+              return;
+            }
+            // Bind the window to event/run creation, not delayed runner execution. Two
+            // closely created events therefore cannot both pass after a long FIFO wait.
+            const cutoff = new Date(currentCreatedAt - windowMs);
+            const request = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: workflowId,
+              actor,
+              created: `>=${cutoff.toISOString()}`,
+              per_page: 100,
+              page: 1,
+            };
+            const response = await github.rest.actions.listWorkflowRuns(request);
+            const runs = response.data?.workflow_runs;
+            if (!Array.isArray(runs)) {
+              throw new Error("GitHub returned an invalid workflow run collection");
+            }
+            if (runs.length === 100) {
+              const overflow = await github.rest.actions.listWorkflowRuns({...request, page: 2});
+              if (!Array.isArray(overflow.data?.workflow_runs) || overflow.data.workflow_runs.length > 0) {
+                throw new Error("qualifying reporter run history exceeds the trusted bound");
+              }
+            }
+            for (const run of runs) {
+              const runId = Number(run.id);
+              if (!Number.isSafeInteger(runId) || runId < 1) {
+                throw new Error("GitHub returned an invalid workflow run ID");
+              }
+              if (runId === currentRunId) continue;
+              const createdAt = Date.parse(run.created_at || "");
+              if (!Number.isFinite(createdAt)) {
+                throw new Error("GitHub returned an invalid workflow run timestamp");
+              }
+              if (createdAt < cutoff.getTime()) continue;
+              const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+                per_page: 100,
+                page: 1,
+              });
+              const artifactCount = Number(artifacts.data?.total_count);
+              if (
+                !Array.isArray(artifacts.data?.artifacts) ||
+                !Number.isSafeInteger(artifactCount) ||
+                artifactCount < 0 ||
+                artifactCount > 100 ||
+                artifacts.data.artifacts.length !== artifactCount
+              ) {
+                throw new Error("qualifying intake artifact history exceeds the trusted bound");
+              }
+              const receiptName = `qualifying-intake-${runId}`;
+              const matchingReceipts = artifacts.data.artifacts.filter(
+                (artifact) => artifact.name === receiptName && !artifact.expired,
+              );
+              if (matchingReceipts.length > 1) {
+                throw new Error("qualifying intake receipt history is duplicated");
+              }
+              if (matchingReceipts.length === 1) {
+                core.notice(`Reporter ${actor} already used the qualifying intake window in run ${runId}.`);
+                return;
+              }
+            }
+            core.setOutput("allowed", "true");
+      - name: Materialize the accepted qualifying-intake receipt
+        if: ${{ steps.rate.outputs.allowed == 'true' }}
+        env:
+          TARGET_NUMBER: ${{ needs.intake_gate.outputs.target_number }}
+          RUN_KIND: ${{ needs.intake_gate.outputs.run_kind }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/qualifying-intake"
+          jq -n \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg actor "${GITHUB_ACTOR}" \
+            --arg target_number "${TARGET_NUMBER}" \
+            --arg run_kind "${RUN_KIND}" \
+            '{run_id:$run_id,actor:$actor,target_number:$target_number,run_kind:$run_kind}' \
+            > "${RUNNER_TEMP}/qualifying-intake/receipt.json"
+      - name: Reserve the reporter window with the trusted receipt
+        if: ${{ steps.rate.outputs.allowed == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qualifying-intake-${{ github.run_id }}
+          path: ${{ runner.temp }}/qualifying-intake/receipt.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
   trusted_issue_snapshot:
     name: Trusted bounded issue snapshot
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    needs: [intake_gate, qualifying_rate_gate]
+    if: ${{ needs.intake_gate.outputs.eligible == 'true' && needs.qualifying_rate_gate.outputs.allowed == 'true' }}
     permissions:
       contents: read
       issues: read
@@ -62,8 +331,12 @@ jobs:
         id: snapshot
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
-          TARGET_NUMBER: ${{ inputs.issue_number }}
-          RETENTION_VERIFIED: ${{ inputs.retention_verified }}
+          TARGET_NUMBER: ${{ needs.intake_gate.outputs.target_number }}
+          RUN_KIND: ${{ needs.intake_gate.outputs.run_kind }}
+          TRIGGER_JSON: ${{ needs.intake_gate.outputs.trigger_json }}
+          INITIAL_MARKER_COUNT: ${{ needs.intake_gate.outputs.initial_marker_count }}
+          CONTINUATION_COUNT: ${{ needs.intake_gate.outputs.continuation_count }}
+          NEEDS_INFO_PRESENT: ${{ needs.intake_gate.outputs.needs_info_present }}
           WORKFLOW_SHA: ${{ github.sha }}
           WORKFLOW_RUN_ID: ${{ github.run_id }}
         with:
@@ -72,11 +345,6 @@ jobs:
             const fs = require("fs");
             const path = require("path");
             const {pathToFileURL} = require("url");
-
-            if (process.env.RETENTION_VERIFIED !== "true") {
-              core.setFailed("Repository Actions artifact and log retention must be verified at one day before calibration");
-              return;
-            }
 
             const issueNumber = Number(process.env.TARGET_NUMBER);
             if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
@@ -96,6 +364,11 @@ jobs:
               targetNumber: issueNumber,
               runId: process.env.WORKFLOW_RUN_ID,
               workflowSha: process.env.WORKFLOW_SHA,
+              runKind: process.env.RUN_KIND,
+              trigger: JSON.parse(process.env.TRIGGER_JSON),
+              expectedInitialMarkerCount: Number(process.env.INITIAL_MARKER_COUNT),
+              expectedContinuationCount: Number(process.env.CONTINUATION_COUNT),
+              expectedNeedsInfoPresent: process.env.NEEDS_INFO_PRESENT === "true",
             });
             const outputDirectory = path.join(
               process.env.RUNNER_TEMP,
@@ -125,21 +398,29 @@ jobs:
           include-hidden-files: false
 
   agent:
-    needs: [trusted_issue_snapshot]
+    needs: [intake_gate, qualifying_rate_gate, trusted_issue_snapshot]
+    if: ${{ needs.intake_gate.outputs.eligible == 'true' && needs.qualifying_rate_gate.outputs.allowed == 'true' }}
     permissions:
       actions: read
       contents: read
   conclusion:
     # gh-aw v0.87.4 emits issue-write-capable noop/failure handlers even when
-    # reporting is disabled. Keep that compiler-owned path unreachable; the
-    # trusted safe-output summary and Actions job status remain observable.
+    # reporting is disabled. Keep that compiler-owned path unreachable; the agent
+    # post-steps record actual usage without giving a reporting job write authority.
     if: ${{ false }}
   safe_outputs:
-    needs: [trusted_issue_snapshot]
+    needs: [intake_gate, qualifying_rate_gate, trusted_issue_snapshot]
+    if: ${{ needs.intake_gate.outputs.eligible == 'true' && needs.qualifying_rate_gate.outputs.allowed == 'true' && needs.agent.result == 'success' }}
     permissions:
       actions: read
       contents: read
+      issues: write
     pre-steps:
+      - name: Require the current run's committed AI credit reservation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: community-issue-triage-aic-reservation
+          path: ${{ runner.temp }}/triage-aic-reservation
       - name: Check out the immutable validator source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -159,7 +440,7 @@ jobs:
           EXPECTED_BUNDLE_DIGEST: ${{ needs.trusted_issue_snapshot.outputs.bundle_digest }}
           EXPECTED_RUN_ID: ${{ github.run_id }}
           EXPECTED_SHA: ${{ github.sha }}
-          EXPECTED_TARGET: ${{ inputs.issue_number }}
+          EXPECTED_TARGET: ${{ needs.intake_gate.outputs.target_number }}
           SNAPSHOT_PATH: ${{ runner.temp }}/trusted-intake-original/context.json
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -206,12 +487,147 @@ jobs:
             });
 
 pre-agent-steps:
+  - name: Reserve the conservative daily AI credit budget
+    id: reserve_daily_budget
+    uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+    env:
+      GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
+      RESERVATION_NAME: community-issue-triage-aic-reservation
+      MAX_AI_CREDITS: "75"
+      MAX_DAILY_AI_CREDITS: "150"
+    with:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+      script: |
+        const fs = require("fs");
+        const path = require("path");
+
+        const block = (message) => {
+          core.setOutput("allowed", "false");
+          if (typeof process.env.GH_AW_SAFE_OUTPUTS !== "string" || process.env.GH_AW_SAFE_OUTPUTS === "") {
+            throw new Error("safe-output path is unavailable for a fail-closed budget decision");
+          }
+          fs.appendFileSync(
+            process.env.GH_AW_SAFE_OUTPUTS,
+            JSON.stringify({type: "noop", message}) + "\n",
+            {encoding: "utf8", mode: 0o600},
+          );
+          core.setFailed(message);
+        };
+
+        core.setOutput("allowed", "false");
+        const reservationName = process.env.RESERVATION_NAME;
+        const perRun = Number(process.env.MAX_AI_CREDITS);
+        const daily = Number(process.env.MAX_DAILY_AI_CREDITS);
+        if (
+          typeof reservationName !== "string" || reservationName === "" ||
+          !Number.isFinite(perRun) || perRun <= 0 ||
+          !Number.isFinite(daily) || daily < perRun
+        ) {
+          block("The daily AI credit reservation configuration is invalid; no public action was taken.");
+          return;
+        }
+
+        try {
+          const currentRun = await github.rest.actions.getWorkflowRun({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            run_id: Number(context.runId),
+          });
+          const workflowId = Number(currentRun.data?.workflow_id);
+          if (!Number.isSafeInteger(workflowId) || workflowId < 1) {
+            throw new Error("current workflow ID is invalid");
+          }
+          const response = await github.rest.actions.listArtifactsForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            name: reservationName,
+            per_page: 100,
+            page: 1,
+          });
+          const totalCount = Number(response.data?.total_count);
+          const artifacts = response.data?.artifacts;
+          if (
+            !Array.isArray(artifacts) ||
+            !Number.isSafeInteger(totalCount) ||
+            totalCount < 0 ||
+            totalCount > 100 ||
+            artifacts.length !== totalCount
+          ) {
+            throw new Error("daily reservation artifact history exceeds the trusted bound");
+          }
+
+          const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+          const reservedRunIds = new Set();
+          let reserved = 0;
+          for (const artifact of artifacts) {
+            if (artifact?.name !== reservationName) {
+              throw new Error("GitHub returned an unexpected reservation artifact name");
+            }
+            const createdAt = Date.parse(artifact.created_at || "");
+            if (!Number.isFinite(createdAt)) {
+              throw new Error("GitHub returned an invalid reservation timestamp");
+            }
+            if (createdAt < cutoff) continue;
+            if (artifact.expired) {
+              throw new Error("a current-window reservation artifact is unexpectedly expired");
+            }
+            const runId = Number(artifact.workflow_run?.id);
+            if (!Number.isSafeInteger(runId) || runId < 1 || reservedRunIds.has(runId)) {
+              throw new Error("reservation workflow provenance is invalid or duplicated");
+            }
+            const run = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+            if (Number(run.data?.workflow_id) !== workflowId) continue;
+            reservedRunIds.add(runId);
+            reserved += perRun;
+          }
+
+          if (reserved + perRun > daily) {
+            block("The conservative daily AI credit budget is exhausted; no public action was taken.");
+            core.notice(`Daily AI credit reservation blocked at ${reserved}/${daily}.`);
+            return;
+          }
+
+          const directory = path.join(process.env.RUNNER_TEMP, "triage-aic-reservation");
+          fs.mkdirSync(directory, {recursive: true, mode: 0o700});
+          fs.writeFileSync(
+            path.join(directory, "reservation.json"),
+            JSON.stringify({
+              actor: process.env.GITHUB_ACTOR,
+              credits: perRun,
+              run_id: String(context.runId),
+              workflow_id: String(workflowId),
+            }),
+            {encoding: "utf8", mode: 0o600},
+          );
+          core.setOutput("allowed", "true");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "unknown error";
+          core.warning(`Daily AI credit reservation failed closed: ${message}`);
+          block("The daily AI credit reservation could not be verified; no public action was taken.");
+        }
+  - name: Commit the daily AI credit reservation before inference
+    if: ${{ steps.reserve_daily_budget.outputs.allowed == 'true' }}
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+    with:
+      name: community-issue-triage-aic-reservation
+      path: ${{ runner.temp }}/triage-aic-reservation/reservation.json
+      if-no-files-found: error
+      retention-days: 2
+      compression-level: 0
+      overwrite: false
+      include-hidden-files: false
   - name: Download the trusted issue snapshot for inference
+    if: ${{ steps.reserve_daily_budget.outputs.allowed == 'true' }}
     uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
     with:
       artifact-ids: ${{ needs.trusted_issue_snapshot.outputs.artifact_id }}
       path: ${{ runner.temp }}/trusted-intake-download
   - name: Verify trusted snapshot provenance before inference
+    if: ${{ steps.reserve_daily_budget.outputs.allowed == 'true' }}
     uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
     env:
       EXPECTED_ARTIFACT_ID: ${{ needs.trusted_issue_snapshot.outputs.artifact_id }}
@@ -219,7 +635,7 @@ pre-agent-steps:
       EXPECTED_BUNDLE_DIGEST: ${{ needs.trusted_issue_snapshot.outputs.bundle_digest }}
       EXPECTED_RUN_ID: ${{ github.run_id }}
       EXPECTED_SHA: ${{ github.sha }}
-      EXPECTED_TARGET: ${{ inputs.issue_number }}
+      EXPECTED_TARGET: ${{ needs.intake_gate.outputs.target_number }}
       SNAPSHOT_PATH: ${{ runner.temp }}/trusted-intake-download/context.json
     with:
       github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -259,6 +675,7 @@ pre-agent-steps:
           expectedBundleDigest: process.env.EXPECTED_BUNDLE_DIGEST,
         });
   - name: Seal the verified inference snapshot outside agent-writable paths
+    if: ${{ steps.reserve_daily_budget.outputs.allowed == 'true' }}
     shell: bash
     run: |
       set -euo pipefail
@@ -270,6 +687,7 @@ pre-agent-steps:
       rmdir "${RUNNER_TEMP}/trusted-intake-download"
       test "$(stat -c '%U:%G:%a' /opt/gh-aw-trusted-intake/context.json)" = "root:root:444"
   - name: Materialize immutable public repository source without credentials
+    if: ${{ steps.reserve_daily_budget.outputs.allowed == 'true' }}
     shell: bash
     env:
       EXPECTED_REPOSITORY: ${{ github.repository }}
@@ -319,6 +737,7 @@ pre-agent-steps:
       test -z "$(find /opt/gh-aw-repository ! -group root -print -quit)"
       test -z "$(find /opt/gh-aw-repository -perm /0222 -print -quit)"
   - name: Prove the agent repository is credential-free
+    if: ${{ steps.reserve_daily_budget.outputs.allowed == 'true' }}
     shell: bash
     run: |
       set -euo pipefail
@@ -327,6 +746,29 @@ pre-agent-steps:
         echo "unexpected Git credential configuration is present" >&2
         exit 1
       fi
+
+post-steps:
+  - name: Collect the exact pinned-runtime usage files
+    if: ${{ always() && steps.reserve_daily_budget.outputs.allowed == 'true' }}
+    run: bash "${RUNNER_TEMP}/gh-aw/actions/collect_usage_artifact_files.sh"
+  - name: Upload actual AI usage before releasing the agent queue
+    if: ${{ always() && steps.reserve_daily_budget.outputs.allowed == 'true' }}
+    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+    with:
+      name: usage
+      path: |
+        /tmp/gh-aw/usage/aw_info.json
+        /tmp/gh-aw/usage/aw-info.jsonl
+        /tmp/gh-aw/usage/agent_usage.json
+        /tmp/gh-aw/usage/agent_usage.jsonl
+        /tmp/gh-aw/usage/detection_usage.jsonl
+        /tmp/gh-aw/usage/evals.jsonl
+        /tmp/gh-aw/usage/github_rate_limits.jsonl
+        /tmp/gh-aw/usage/agent/token_usage.jsonl
+        /tmp/gh-aw/usage/detection/token_usage.jsonl
+        /tmp/gh-aw/usage/activity/summary.json
+      if-no-files-found: error
+      retention-days: 2
 
 tools:
   bash: false
@@ -355,14 +797,14 @@ safe-outputs:
   missing-data: false
   missing-tool: false
   timeout-minutes: 5
-  concurrency-group: community-issue-triage-safe-outputs
   threat-detection: false
   steps:
     - name: Validate and render the attested readiness proposal
+      id: validate_output
       shell: bash
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        TARGET_NUMBER: ${{ inputs.issue_number }}
+        TARGET_NUMBER: ${{ needs.intake_gate.outputs.target_number }}
         SNAPSHOT_PATH: ${{ runner.temp }}/trusted-intake-original/context.json
       run: |
         node <<'NODE'
@@ -435,6 +877,15 @@ safe-outputs:
           );
           fs.renameSync(trustedOutputPath, outputPath);
 
+          if (!process.env.GITHUB_OUTPUT) {
+            throw new Error("GITHUB_OUTPUT is unavailable");
+          }
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            "remove_needs_info=" + (result.carrier === "completion" ? "true" : "false") + "\n",
+            {encoding: "utf8", mode: 0o600},
+          );
+
           if (!process.env.GITHUB_STEP_SUMMARY) {
             throw new Error("GITHUB_STEP_SUMMARY is unavailable");
           }
@@ -454,7 +905,7 @@ safe-outputs:
                   )
                   .join("\n");
           const summary =
-            "## Validated inert Stage B readiness proposal\n\n" +
+            "## Validated community issue triage\n\n" +
             "Target: issue #" +
             targetNumber +
             "\n\n### Trusted bounded candidate research\n\n" +
@@ -470,21 +921,57 @@ safe-outputs:
             result.summary.rendered_html
               .map((value) => "<pre>" + value + "</pre>")
               .join("\n\n") +
-            "\n\n> If safe-output processing succeeds, the needs-info label will be submitted as a maintainer-review suggestion; comments remain preview-only.\n";
+            "\n\n> Trusted validation completed before any bounded public output was applied.\n";
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
         };
         validate().catch((error) => {
           console.error(
-            "Blocked inert Stage B readiness output: " +
+            "Blocked community issue triage output: " +
               (error instanceof Error ? error.message : "unknown error"),
           );
           process.exit(1);
         });
         NODE
+    - name: Apply trusted complete continuation label removal
+      if: ${{ steps.validate_output.outputs.remove_needs_info == 'true' }}
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        TARGET_NUMBER: ${{ needs.intake_gate.outputs.target_number }}
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const targetNumber = Number(process.env.TARGET_NUMBER);
+          if (!Number.isSafeInteger(targetNumber) || targetNumber < 1) {
+            throw new Error("trusted continuation target is invalid");
+          }
+          try {
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: targetNumber,
+              name: "needs-info",
+            });
+          } catch (error) {
+            if (error?.status === 404) {
+              core.notice("needs-info was already absent from the trusted continuation target.");
+              return;
+            }
+            throw error;
+          }
   add-labels:
     staged: false
-    target: ${{ inputs.issue_number }}
+    target: triggering
     allowed:
+      - bug
+      - enhancement
+      - documentation
+      - dependencies
+      - docker
+      - github-actions
+      - api
+      - network
+      - protect
+      - access
       - needs-info
     blocked:
       - triage-reviewed
@@ -497,27 +984,26 @@ safe-outputs:
       - breaking change
       - compatibility-critical
       - "*[bot]"
-    max: 1
+    max: 4
     issues: true
     pull-requests: false
     issue-intent: true
   add-comment:
-    staged: true
-    target: ${{ inputs.issue_number }}
+    staged: false
+    target: triggering
     max: 1
     discussions: false
-    issues: false
+    issues: true
     pull-requests: false
     footer: true
 ---
 
 # Community issue triage
 
-Analyze issue `${{ inputs.issue_number }}` in `sirkirby/unifi-mcp` for the inert Stage B
-readiness workflow. Only a `needs-info` label may be proposed, and the trusted validator
-routes it to GitHub as a suggestion that requires maintainer review. An optional comment
-remains preview-only. Do not describe either output as a change already applied. This
-workflow does not activate automatic triage or public comments.
+Analyze issue `${{ needs.intake_gate.outputs.target_number }}` in `sirkirby/unifi-mcp` for an
+automatic, bounded first-pass response. Trusted code validates every public label, comment,
+and `needs-info` removal. A human maintainer retains all closure, priority, assignment,
+approval, merge, and final-disposition decisions.
 
 ## Hard boundaries
 
@@ -551,7 +1037,7 @@ When the sensitive-intake stop path is activated:
    the sensitive material in any output.
 2. Do not propose `security` or any other label.
 3. Emit exactly one `noop`. Its `message` must be canonical JSON for the bundle scope:
-   target `{"kind":"sensitive_stop","target_receipt":"<target receipt>","version":2}`;
+   target `{"kind":"sensitive_stop","target_receipt":"<target receipt>","version":3}`;
    comments adds `"comments_receipt":"<comments receipt>"` in canonical key order;
    candidate adds the ordered `"candidate_receipts":["<receipt>"]` array as well.
    Do not emit the rendered stop sentence yourself; trusted code renders it.
@@ -568,7 +1054,8 @@ that two issues are duplicates, and an empty candidate list is not proof that no
 Do not perform substitute network research. You have no GitHub MCP or GitHub credential.
 
 1. Read the target `data`, every target comment `data` entry, and every candidate `data`
-   entry from the artifact. Normal triage applies to open and closed issues.
+   entry from the artifact. The trusted gate has already limited normal triage to an open,
+   non-pull-request issue triggered by its human reporter.
 2. Trust deterministic issue-form metadata first. Preserve an existing `bug`,
    `enhancement`, or `documentation` label. Map an explicit component selection only
    when it has an exact allowed label: Network to `network`, Protect to `protect`,
@@ -580,7 +1067,7 @@ Do not perform substitute network research. You have no GitHub MCP or GitHub cre
 3. Classify any unresolved issue type as bug, enhancement, documentation,
    question/support, or unclear. Do not force a component label when no exact label
    exists.
-4. Evaluate every candidate before choosing a label, comment, or `noop`. A candidate is
+4. Evaluate every candidate before choosing labels or a comment. A candidate is
    evidence, not a duplicate disposition. Never propose the `duplicate` label. Create one
    relationship object per candidate, in the exact artifact order, with the exact candidate
    number and receipt, one `RELATED`, `NOT_RELATED`, or `UNCERTAIN` verdict, and a specific
@@ -597,59 +1084,56 @@ Do not perform substitute network research. You have no GitHub MCP or GitHub cre
 
 ## Safe-output contract
 
-Before calling any safe-output tool, choose exactly one final disposition:
+The artifact's `run_kind` selects exactly one contract:
 
-- **ACTION:** propose `add_labels`, `add_comment`, or both. Never also call `noop`.
-- **NO-ACTION:** propose exactly one `noop`. Never also call `add_labels` or `add_comment`.
+- **Initial:** call `add_comment` once with the canonical v3 proposal as its body. Call
+  `add_labels` at most once with 1 to 4 unique allowlisted label intents, and only when
+  the trusted intake truthfully supports them; do not force a label for a complete
+  support question or unclear report. The proposal's `label_intents` must be empty when
+  `add_labels` is omitted. Use only `bug`, `enhancement`, `documentation`, `dependencies`,
+  `docker`, `github-actions`, `api`, `network`, `protect`, `access`, and `needs-info`.
+  Never propose `needs-info` unless the decision is `missing_information`; never propose
+  it for `ready_for_maintainer`.
+- **Incomplete continuation:** call only `add_comment` with a `missing_information`
+  proposal. The proposal's `label_intents` must be empty because `needs-info` already
+  exists. Trusted code adds the continuation marker.
+- **Complete continuation:** call only `noop`. Its `message` must be canonical JSON with
+  `{"kind":"complete_continuation","target_receipt":"<target receipt>","trigger_receipt":"<trigger receipt>","version":3}`.
+  Do not emit a comment or add labels. Trusted code verifies the receipts, existing label,
+  and run kind before applying the issue-only removal.
+- **Sensitive stop:** call only the canonical receipt-bound `noop` described above.
 
-A label-only ACTION is complete and does not need a `noop`. Every normal disposition
-must carry the target receipt, comments receipt, and the complete ordered relationship
-array, including an empty array when no candidate exists.
+For every normal initial or incomplete-continuation proposal:
 
-- Use only these argument shapes: `add_comment` with `{body}`; `add_labels` with
-  `{labels: [{name, rationale, confidence}]}`; and `noop` with `{message}`. Omit every
-  selector or control field, including `item_number`, `repo`, `target`, `comment_id`,
-  `reply_to_id`, `suggest`, `secrecy`, and `integrity`. The trusted validator injects the
-  dispatch target and `suggest: true` after validating the proposal.
-- Propose exactly one label at most: `needs-info`, and only when a specific objectively
-  required fact is missing. Do not propose type, component, completion, or priority labels
-  during this readiness workflow.
-- Never propose `triage-reviewed`. That completion label is reserved for a human
-  maintainer until tool-use evidence is tamper-resistant and success-correlated.
-- Use one designated canonical JSON carrier: the `needs-info` label rationale when a
-  label exists, otherwise the comment body, otherwise the `noop` message. Canonical JSON
-  has no extra whitespace and sorts object keys alphabetically at every level.
-- A normal carrier has this exact structure:
-  `{"comments_receipt":"<comments receipt>","decision":<decision>,"kind":"triage_proposal","relationships":[<relationship>],"target_receipt":"<target receipt>","version":2}`.
-  A relationship is
+- Use `add_comment` with `{body}` and `add_labels` with
+  `{labels:[{name,rationale,confidence}]}` only.
+  Omit selectors and control fields such as `item_number`, `repo`, `target`, `comment_id`,
+  `suggest`, `secrecy`, and `integrity`; trusted code injects the target and suggestion flag.
+- Each label rationale must be 20 to 240 normalized, specific, safe visible characters.
+  Confidence is exactly `LOW`, `MEDIUM`, or `HIGH`. The proposal `label_intents` must
+  exactly match the `add_labels` array, including order.
+- The comment body is canonical JSON with no extra whitespace and alphabetically sorted
+  keys at every level. Its exact top-level structure is:
+  `{"comments_receipt":"<comments receipt>","decision":<decision>,"kind":"triage_proposal","label_intents":[<label intent>],"relationships":[<relationship>],"run_kind":"<artifact run kind>","target_receipt":"<target receipt>","trigger_receipt":"<trigger receipt>","version":3}`.
+  Copy `run_kind` and all receipts exactly from the artifact.
+- A relationship is
   `{"candidate_number":123,"candidate_receipt":"<candidate receipt>","reason":"specific normalized reason","verdict":"RELATED"}`.
-  Use the same structure and key order for `NOT_RELATED` or `UNCERTAIN`.
-- For a label carrier, the decision is
-  `{"fields":["field_id"],"kind":"needs_info"}` with 1 to 3 unique IDs from
-  `package_version`, `transport`, `controller_version`, `sanitized_error`,
-  `reproduction_steps`, `expected_actual`, and `live_controller_evidence`. Keep
-  calibrated `LOW`, `MEDIUM`, or `HIGH` confidence outside the rationale JSON. Trusted
-  code renders the complete-sentence rationale.
-- For a comment-only carrier, the decision is either
-  `{"fields":["field_id"],"kind":"missing_information"}` or
+  Cover every candidate exactly once in artifact order; use `NOT_RELATED` or `UNCERTAIN`
+  when appropriate and an empty array when there are no candidates.
+- Initial decisions are exactly `{"kind":"ready_for_maintainer"}`,
+  `{"fields":["field_id"],"kind":"missing_information"}`, or
   `{"kind":"repository_evidence","path":"docs/example.md","quote":"exact contiguous quote"}`.
-  Repository evidence must come from the immutable local checkout and use
-  `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, or a Markdown file under `docs/`,
-  `apps/`, or `packages/`. Copy one unique exact quote of 20 to 600 safe characters;
-  supply no repository, ref, URL, or line numbers. The trusted validator independently
-  fetches it at `GITHUB_SHA` and rejects any mismatch.
-- If both label and comment are proposed, the label rationale is the sole carrier. The
-  comment body uses the decision-only canonical form
-  `{"decision":{"fields":["field_id"],"kind":"missing_information"},"kind":"triage_action","version":2}`
-  or the corresponding `repository_evidence` decision. It must not repeat receipts or
-  relationships. When using a missing-information comment with a label, use the same
-  field IDs in both decisions.
-- When neither a label nor a comment is warranted, use the exact decision
-  `{"kind":"noop"}` in the canonical carrier. Trusted code supplies the fixed visible
-  no-action sentence. Do not use `noop` when any other safe output is proposed.
-- If the artifact/repository read or safe-output tool fails and prevents a truthful
-  triage result, do not call any safe-output tool. Stop so the fail-closed validator
-  marks the run failed; do not substitute a label, comment, or `noop`.
+  Missing-information fields are 1 to 3 unique values from `package_version`, `transport`,
+  `controller_version`, `sanitized_error`, `reproduction_steps`, `expected_actual`, and
+  `live_controller_evidence`.
+- Repository evidence must come from the immutable local source and use `README.md`,
+  `CONTRIBUTING.md`, `SECURITY.md`, or a Markdown file under `docs/`, `apps/`, or
+  `packages/`. Copy one unique exact quote of 20 to 600 safe characters. Trusted code
+  independently fetches it at `GITHUB_SHA` and rejects any mismatch.
+- Never propose `triage-reviewed`, `duplicate`, `security`, closure, assignment, priority,
+  approval, merge, branch, or pull-request actions.
+- If artifact or repository evidence cannot support a truthful result, emit no safe output
+  and let validation fail closed. Do not substitute a public guess.
 - Never include hidden reasoning, raw event data, private plans, credentials, private
   controller information, or copied sensitive strings.
 - Use only raw absolute `https://github.com/sirkirby/unifi-mcp/...` URLs. Do not use

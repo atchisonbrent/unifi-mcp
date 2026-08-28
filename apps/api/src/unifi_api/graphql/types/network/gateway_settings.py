@@ -61,6 +61,7 @@ class GatewaySettings:
     tcp_time_wait_timeout: int | None
     timeout_setting_preference: str | None
     # Misc
+    echo_server: str | None
     unbind_wan_monitors: bool | None
 
     @classmethod
@@ -119,6 +120,7 @@ class GatewaySettings:
             tcp_syn_sent_timeout=raw.get("tcp_syn_sent_timeout"),
             tcp_time_wait_timeout=raw.get("tcp_time_wait_timeout"),
             timeout_setting_preference=raw.get("timeout_setting_preference"),
+            echo_server=raw.get("echo_server"),
             unbind_wan_monitors=raw.get("unbind_wan_monitors"),
         )
 

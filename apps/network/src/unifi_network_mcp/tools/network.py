@@ -239,10 +239,14 @@ CONNECTIVITY_CRITICAL_WAN_FIELDS: frozenset[str] = frozenset(
         "wan_load_balance_type",
         "wan_load_balance_weight",
         "wan_failover_priority",
+        "wan_sla",
         "wan_vlan_enabled",
         "mac_override_enabled",
     }
 )
+
+# Moving a network between firewall zones changes its security-policy scope.
+SECURITY_CRITICAL_NETWORK_FIELDS: frozenset[str] = frozenset({"firewall_zone_id"})
 
 
 @server.tool(
@@ -251,7 +255,9 @@ CONNECTIVITY_CRITICAL_WAN_FIELDS: frozenset[str] = frozenset(
     "Pass only the fields you want to change — current values are automatically preserved. "
     "Basic: name, purpose ('corporate'/'vlan-only'), vlan_enabled (bool), vlan (str), "
     "ip_subnet (CIDR), enabled (bool), network_isolation_enabled (bool, corporate only), "
-    "internet_access_enabled (bool), upnp_lan_enabled (bool). "
+    "internet_access_enabled (bool), upnp_lan_enabled (bool), "
+    "firewall_zone_id (str, V2 firewall-zone ID — assigns the network to a zone; these IDs are scoped "
+    "to the V2 firewall/network tool family, so do not pass Integration API firewall-zone UUIDs). "
     "DHCP: dhcpd_enabled (bool), dhcpd_start (IP), dhcpd_stop (IP), dhcpd_leasetime (int seconds), auto_scale_enabled (bool), "
     "dhcpd_gateway (IP), dhcpd_gateway_enabled (bool), dhcp_relay_enabled (bool), "
     "dhcpd_conflict_checking (bool), dhcpguard_enabled (bool, requires dhcpd_ip_1), dhcpd_ip_1 (IP, trusted DHCP server for guard), dhcpd_boot_enabled (bool), dhcpd_boot_server (IP), dhcpd_boot_filename (str), dhcpd_tftp_server (str, DHCP opt 150). "
@@ -264,7 +270,8 @@ CONNECTIVITY_CRITICAL_WAN_FIELDS: frozenset[str] = frozenset(
     "WAN (gateway uplink, purpose='wan' networks): wan_type ('dhcp'/'static'/'pppoe'/'disabled'), "
     "wan_networkgroup ('WAN'/'WAN2'), wan_dns_preference ('auto'/'manual'), "
     "wan_load_balance_type ('failover-only'/'weighted'), wan_load_balance_weight (int 0-100), "
-    "wan_failover_priority (int), wan_smartq_enabled (bool), wan_vlan_enabled (bool), "
+    "wan_failover_priority (int), wan_sla (str, controller WAN-SLA configuration ID), "
+    "report_wan_event (bool), wan_smartq_enabled (bool), wan_vlan_enabled (bool), "
     "igmp_proxy_upstream (bool), igmp_proxy_for (JSON: 'none' or list of network refs), "
     "mac_override_enabled (bool), wan_ip_aliases (list). "
     "WAN IPv6 (dual-stack; does not affect IPv4 internet): ipv6_enabled (bool), wan_type_v6 (str), "
@@ -430,6 +437,7 @@ async def update_network(
 
     if not confirm:
         wan_critical = sorted(set(validated_data) & CONNECTIVITY_CRITICAL_WAN_FIELDS)
+        security_critical = sorted(set(validated_data) & SECURITY_CRITICAL_NETWORK_FIELDS)
         warnings = []
         if wan_critical and current.get("purpose") == "wan":
             wan_name = current.get("name") or network_id
@@ -438,6 +446,11 @@ async def update_network(
                 + ", ".join(wan_critical)
                 + f" on WAN '{wan_name}' may interrupt internet connectivity. "
                 "Verify the values before setting confirm=true."
+            )
+        if security_critical:
+            warnings.append(
+                "WARNING: Changing firewall_zone_id moves this network into a different V2 firewall zone and "
+                "changes which security policies apply. Verify the V2 zone ID before setting confirm=true."
             )
         if validated_data.get("ipv6_interface_type") == "static" and current.get("ipv6_interface_type") == "pd":
             warnings.append(
@@ -558,7 +571,7 @@ async def create_network(
     network_data: Annotated[
         Dict[str, Any],
         Field(
-            description="Network configuration dict. Required: name (str), purpose (str: 'corporate', 'wan', 'vlan-only', 'vpn-client', 'vpn-server'). 'guest' is rejected because the legacy API can silently place it in the Internal firewall zone; create Hotspot-zone networks in the UniFi UI. Required if purpose != 'vlan-only': ip_subnet (CIDR, e.g. '192.168.1.0/24'). Required if purpose == 'vlan-only': vlan (int 1-4094). Optional: vlan_enabled, vlan, dhcpd_enabled, dhcpd_start, dhcpd_stop, dhcpd_leasetime, domain_name, enabled, network_isolation_enabled, upnp_lan_enabled. See update_network for the full list of supported DHCP/DNS fields."
+            description="Network configuration dict. Required: name (str), purpose (str: 'corporate', 'wan', 'vlan-only', 'vpn-client', 'vpn-server'). 'guest' is rejected because the legacy API can silently place it in the Internal firewall zone; create Hotspot-zone networks in the UniFi UI. Required if purpose != 'vlan-only': ip_subnet (CIDR, e.g. '192.168.1.0/24'). Required if purpose == 'vlan-only': vlan (int 1-4094). Optional: vlan_enabled, vlan, dhcpd_enabled, dhcpd_start, dhcpd_stop, dhcpd_leasetime, domain_name, enabled, network_isolation_enabled, upnp_lan_enabled, firewall_zone_id (V2 firewall-zone ID from unifi_list_firewall_zones; do not pass Integration API UUIDs). See update_network for the full list of supported fields."
         ),
     ],
     confirm: Annotated[
@@ -595,6 +608,7 @@ async def create_network(
     - enabled (boolean): Whether the network is enabled (default: true)
     - network_isolation_enabled (boolean): Enable network isolation (IMPORTANT: Only works on networks with purpose="corporate")
     - upnp_lan_enabled (boolean): Enable UPnP on this network
+    - firewall_zone_id (string): V2 firewall-zone ID from unifi_list_firewall_zones; do not pass Integration API UUIDs
     (see update_network for the full list of additional DHCP/DNS fields that can
     also be supplied at creation time)
 

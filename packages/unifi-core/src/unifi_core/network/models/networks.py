@@ -219,6 +219,13 @@ class Network(BaseModel):
         default=None,
         description="Enable UPnP on this network",
     )
+    firewall_zone_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "V2 firewall-zone ID this network belongs to. These IDs are scoped to the V2 "
+            "firewall/network tool family — do not pass Integration API firewall-zone UUIDs"
+        ),
+    )
     # --- WAN uplink (gateway interface; networkconf entries with purpose=wan) ---
     # NOTE: changing connectivity-critical WAN fields can interrupt internet access;
     # the update tool surfaces a warning in its confirm-preview for these.
@@ -248,6 +255,14 @@ class Network(BaseModel):
     wan_failover_priority: Optional[int] = Field(
         default=None,
         description="Failover priority (lower value = higher priority)",
+    )
+    wan_sla: Optional[str] = Field(
+        default=None,
+        description="Controller WAN-SLA configuration ID used for this uplink's failover health checks",
+    )
+    report_wan_event: Optional[bool] = Field(
+        default=None,
+        description="Report WAN failover/preempt events to the event log",
     )
     wan_smartq_enabled: Optional[bool] = Field(
         default=None,
@@ -463,12 +478,15 @@ def from_controller(raw: Any) -> Network:
         network_isolation_enabled=_get(raw, "network_isolation_enabled"),
         internet_access_enabled=_get(raw, "internet_access_enabled"),
         upnp_lan_enabled=_get(raw, "upnp_lan_enabled"),
+        firewall_zone_id=_get(raw, "firewall_zone_id"),
         wan_type=_get(raw, "wan_type"),
         wan_networkgroup=_get(raw, "wan_networkgroup"),
         wan_dns_preference=_get(raw, "wan_dns_preference"),
         wan_load_balance_type=_get(raw, "wan_load_balance_type"),
         wan_load_balance_weight=_get(raw, "wan_load_balance_weight"),
         wan_failover_priority=_get(raw, "wan_failover_priority"),
+        wan_sla=_get(raw, "wan_sla"),
+        report_wan_event=_get(raw, "report_wan_event"),
         wan_smartq_enabled=_get(raw, "wan_smartq_enabled"),
         wan_vlan_enabled=_get(raw, "wan_vlan_enabled"),
         igmp_proxy_upstream=_get(raw, "igmp_proxy_upstream"),

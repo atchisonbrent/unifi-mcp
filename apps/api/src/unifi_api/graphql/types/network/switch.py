@@ -57,6 +57,12 @@ class PortProfile:
     stp_bpdu_guard_enabled: bool | None
     stp_uplink: bool | None
     dot1x_ctrl: str | None
+    stormctrl_bcast_enabled: bool | None
+    stormctrl_bcast_rate: int | None
+    stormctrl_mcast_enabled: bool | None
+    stormctrl_mcast_rate: int | None
+    stormctrl_ucast_enabled: bool | None
+    stormctrl_ucast_rate: int | None
 
     @classmethod
     def render_hint(cls, kind: str) -> dict:
@@ -88,6 +94,12 @@ class PortProfile:
             stp_bpdu_guard_enabled=_get(obj, "stp_bpdu_guard_enabled"),
             stp_uplink=_get(obj, "stp_uplink"),
             dot1x_ctrl=_get(obj, "dot1x_ctrl"),
+            stormctrl_bcast_enabled=_get(obj, "stormctrl_bcast_enabled"),
+            stormctrl_bcast_rate=_get(obj, "stormctrl_bcast_rate"),
+            stormctrl_mcast_enabled=_get(obj, "stormctrl_mcast_enabled"),
+            stormctrl_mcast_rate=_get(obj, "stormctrl_mcast_rate"),
+            stormctrl_ucast_enabled=_get(obj, "stormctrl_ucast_enabled"),
+            stormctrl_ucast_rate=_get(obj, "stormctrl_ucast_rate"),
         )
 
     def to_dict(self) -> dict:

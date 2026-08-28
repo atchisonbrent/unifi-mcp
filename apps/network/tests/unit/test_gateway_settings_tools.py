@@ -16,6 +16,7 @@ SAMPLE_USG = {
     "geo_ip_filtering_enabled": False,
     "ftp_module": True,
     "tcp_established_timeout": 7440,
+    "echo_server": "8.8.8.8",
     "dns_verification": {"setting_preference": "auto", "primary_dns_server": "1.1.1.1"},
 }
 
@@ -136,6 +137,38 @@ class TestUpdateGatewaySettings:
         mgr.update_gateway_settings.assert_awaited_once_with({"upnp_enabled": True})
 
     @pytest.mark.asyncio
+    async def test_confirm_forwards_echo_server(self):
+        updated = {**SAMPLE_USG, "echo_server": "1.1.1.1"}
+        with patch(_MGR) as mgr:
+            mgr.get_gateway_settings = AsyncMock(side_effect=[SAMPLE_USG, updated])
+            mgr.update_gateway_settings = AsyncMock(return_value=(True, None))
+            from unifi_network_mcp.tools.gateway_settings import update_gateway_settings
+
+            result = await update_gateway_settings({"echo_server": "1.1.1.1"}, confirm=True)
+
+        assert result["success"] is True
+        mgr.update_gateway_settings.assert_awaited_once_with({"echo_server": "1.1.1.1"})
+
+    @pytest.mark.asyncio
+    async def test_echo_server_preview_warns_about_failover(self):
+        with patch(_MGR) as mgr:
+            mgr.get_gateway_settings = AsyncMock(return_value=SAMPLE_USG)
+            from unifi_network_mcp.tools.gateway_settings import update_gateway_settings
+
+            result = await update_gateway_settings({"echo_server": "1.1.1.1"}, confirm=False)
+
+        assert any("echo_server" in warning for warning in result.get("warnings") or [])
+
+    @pytest.mark.asyncio
+    async def test_echo_server_rejects_non_string(self):
+        from unifi_network_mcp.tools.gateway_settings import update_gateway_settings
+
+        result = await update_gateway_settings({"echo_server": 42}, confirm=False)
+
+        assert result["success"] is False
+        assert "Invalid gateway settings update data" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_dns_verification_non_dict_rejection_surfaces(self):
         """A non-dict dns_verification is passed through by gw_to_update and rejected
         by the manager guard; the rejection must surface to the caller envelope."""
@@ -161,8 +194,38 @@ class TestUpdateGatewaySettings:
 
         with patch(_MGR) as mgr:
             mgr.get_gateway_settings = AsyncMock(return_value=SAMPLE_USG)
+            string_values = {
+                "echo_server": "1.1.1.1",
+                "geo_ip_filtering_block": "block",
+                "geo_ip_filtering_countries": "US",
+                "geo_ip_filtering_traffic_direction": "both",
+                "mss_clamp": "auto",
+                "timeout_setting_preference": "auto",
+                "upnp_wan_interface": "WAN",
+            }
+            int_fields = {
+                "icmp_timeout",
+                "other_timeout",
+                "udp_stream_timeout",
+                "udp_other_timeout",
+                "tcp_established_timeout",
+                "tcp_close_timeout",
+                "tcp_close_wait_timeout",
+                "tcp_fin_wait_timeout",
+                "tcp_last_ack_timeout",
+                "tcp_syn_recv_timeout",
+                "tcp_syn_sent_timeout",
+                "tcp_time_wait_timeout",
+            }
             for field in sorted(SECURITY_SENSITIVE_FIELDS):
-                val = {"setting_preference": "manual"} if field == "dns_verification" else True
+                if field == "dns_verification":
+                    val = {"setting_preference": "manual"}
+                elif field in string_values:
+                    val = string_values[field]
+                elif field in int_fields:
+                    val = 30
+                else:
+                    val = True
                 result = await update_gateway_settings(update_data={field: val}, confirm=False)
                 assert result.get("warnings"), f"{field} should warn"
                 assert field in result["warnings"][0], f"{field} missing from warning text"

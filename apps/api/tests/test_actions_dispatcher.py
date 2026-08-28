@@ -1392,7 +1392,15 @@ async def test_dispatch_translates_gateway_settings_update_filters_to_mutable() 
         controller_id="cid",
         controller_products=["network"],
         site="default",
-        args={"update_data": {"upnp_enabled": True, "_id": "x", "key": "usg", "bogus": 1}},
+        args={
+            "update_data": {
+                "upnp_enabled": True,
+                "echo_server": "1.1.1.1",
+                "_id": "x",
+                "key": "usg",
+                "bogus": 1,
+            }
+        },
         confirm=True,
         dispatch_table={
             "unifi_update_gateway_settings": DispatchEntry(
@@ -1405,7 +1413,20 @@ async def test_dispatch_translates_gateway_settings_update_filters_to_mutable() 
     (positional, keyword) = domain_manager.update_gateway_settings.await_args
     assert keyword == {}, f"expected no kwargs; got {keyword}"
     # read-only (_id, key) + unknown (bogus) filtered out; only the mutable field survives
-    assert positional[0] == {"upnp_enabled": True}
+    assert positional[0] == {"upnp_enabled": True, "echo_server": "1.1.1.1"}
+
+
+def test_update_network_translator_forwards_firewall_zone_and_wan_monitor_fields() -> None:
+    translator = DISPATCH_ARG_TRANSLATORS["unifi_update_network"]
+    fields = {
+        "firewall_zone_id": "zone-v2-1",
+        "wan_sla": "sla-1",
+        "report_wan_event": False,
+    }
+
+    _, kwargs = translator({"network_id": "wan-1", "update_data": fields})
+
+    assert kwargs == {"network_id": "wan-1", "update_data": fields}
 
 
 def _ddns_factory():
@@ -3447,6 +3468,37 @@ def test_create_port_profile_translator_forwards_new_access_port_fields() -> Non
     assert payload["stp_edge_state"] == "enabled"
     assert payload["stp_bpdu_guard_enabled"] is True
     assert payload["stp_uplink"] is False
+
+
+def test_create_port_profile_translator_forwards_all_storm_control_fields() -> None:
+    translator = DISPATCH_ARG_TRANSLATORS["unifi_create_port_profile"]
+
+    _, kwargs = translator(
+        {
+            "name": "Storm",
+            "forward": "native",
+            "stormctrl_bcast_enabled": True,
+            "stormctrl_bcast_rate": 500,
+            "stormctrl_mcast_enabled": False,
+            "stormctrl_mcast_rate": 1000,
+            "stormctrl_ucast_enabled": True,
+            "stormctrl_ucast_rate": 1500,
+        }
+    )
+
+    assert kwargs["profile_data"] == {
+        "name": "Storm",
+        "forward": "native",
+        "isolation": False,
+        "poe_mode": "auto",
+        "stp_port_mode": True,
+        "stormctrl_bcast_enabled": True,
+        "stormctrl_bcast_rate": 500,
+        "stormctrl_mcast_enabled": False,
+        "stormctrl_mcast_rate": 1000,
+        "stormctrl_ucast_enabled": True,
+        "stormctrl_ucast_rate": 1500,
+    }
 
 
 def test_create_port_profile_translator_requires_name_and_forward() -> None:

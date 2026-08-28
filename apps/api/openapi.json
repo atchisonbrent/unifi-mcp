@@ -2915,6 +2915,17 @@
             ],
             "title": "Dns Verification"
           },
+          "echo_server": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Echo Server"
+          },
           "ftp_module": {
             "anyOf": [
               {
@@ -4396,6 +4407,18 @@
             "title": "Enabled",
             "type": "boolean"
           },
+          "firewall_zone_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "V2 firewall-zone ID. These IDs are scoped to the V2 firewall/network tool family; do not pass Integration API firewall-zone UUIDs.",
+            "title": "Firewall Zone Id"
+          },
           "id": {
             "anyOf": [
               {
@@ -4693,6 +4716,17 @@
             ],
             "title": "Purpose"
           },
+          "report_wan_event": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Report Wan Event"
+          },
           "subnet": {
             "anyOf": [
               {
@@ -4855,6 +4889,18 @@
               }
             ],
             "title": "Wan Networkgroup"
+          },
+          "wan_sla": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Controller WAN-SLA configuration ID for this uplink.",
+            "title": "Wan Sla"
           },
           "wan_smartq_enabled": {
             "anyOf": [
@@ -6771,6 +6817,72 @@
               }
             ],
             "title": "Poe Mode"
+          },
+          "stormctrl_bcast_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stormctrl Bcast Enabled"
+          },
+          "stormctrl_bcast_rate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stormctrl Bcast Rate"
+          },
+          "stormctrl_mcast_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stormctrl Mcast Enabled"
+          },
+          "stormctrl_mcast_rate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stormctrl Mcast Rate"
+          },
+          "stormctrl_ucast_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stormctrl Ucast Enabled"
+          },
+          "stormctrl_ucast_rate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stormctrl Ucast Rate"
           },
           "stp_bpdu_guard_enabled": {
             "anyOf": [

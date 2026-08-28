@@ -1157,6 +1157,12 @@ def _translate_port_profile_create(args: dict[str, Any]) -> tuple[tuple[Any, ...
         "stp_bpdu_guard_enabled",
         "stp_uplink",
         "dot1x_ctrl",
+        "stormctrl_bcast_enabled",
+        "stormctrl_bcast_rate",
+        "stormctrl_mcast_enabled",
+        "stormctrl_mcast_rate",
+        "stormctrl_ucast_enabled",
+        "stormctrl_ucast_rate",
     }
     supplied = {key: value for key, value in args.items() if key in accepted and value is not None}
     if not supplied.get("name") or not supplied.get("forward"):

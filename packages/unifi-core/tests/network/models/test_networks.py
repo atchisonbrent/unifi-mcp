@@ -44,6 +44,8 @@ class TestFieldSets:
             "wan_load_balance_type",
             "wan_load_balance_weight",
             "wan_failover_priority",
+            "wan_sla",
+            "report_wan_event",
             "wan_smartq_enabled",
             "wan_vlan_enabled",
             "igmp_proxy_upstream",
@@ -52,6 +54,9 @@ class TestFieldSets:
             "wan_ip_aliases",
         ):
             assert field in MUTABLE_FIELDS, f"Expected {field!r} in MUTABLE_FIELDS"
+
+    def test_firewall_zone_id_is_mutable(self) -> None:
+        assert "firewall_zone_id" in MUTABLE_FIELDS
 
     def test_mutable_fields_contains_ipv6_wan_fields(self) -> None:
         for field in (
@@ -165,6 +170,8 @@ class TestFromController:
             "wan_load_balance_type": "weighted",
             "wan_load_balance_weight": 99,
             "wan_failover_priority": 1,
+            "wan_sla": "sla-1",
+            "report_wan_event": False,
             "wan_smartq_enabled": False,
             "wan_vlan_enabled": False,
             "igmp_proxy_upstream": False,
@@ -179,6 +186,8 @@ class TestFromController:
         assert n.wan_load_balance_type == "weighted"
         assert n.wan_load_balance_weight == 99
         assert n.wan_failover_priority == 1
+        assert n.wan_sla == "sla-1"
+        assert n.report_wan_event is False
         assert n.wan_smartq_enabled is False
         assert n.wan_vlan_enabled is False
         assert n.igmp_proxy_upstream is False
@@ -258,6 +267,19 @@ class TestStrictValidation:
         # strict validation; the allowlist must keep a write path for them.
         assert validate_update({"ipv6_ra_enabled": False}) == {"ipv6_ra_enabled": False}
         assert validate_update({"auto_scale_enabled": True}) == {"auto_scale_enabled": True}
+
+    def test_update_accepts_firewall_zone_and_wan_monitor_fields(self) -> None:
+        assert validate_update(
+            {
+                "firewall_zone_id": "zone-v2-1",
+                "wan_sla": "sla-1",
+                "report_wan_event": False,
+            }
+        ) == {
+            "firewall_zone_id": "zone-v2-1",
+            "wan_sla": "sla-1",
+            "report_wan_event": False,
+        }
 
     def test_update_normalizes_string_vlan_to_controller_int(self) -> None:
         # Callers may send vlan as a string (the documented tool format); the

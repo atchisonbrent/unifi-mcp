@@ -71,6 +71,8 @@ SECURITY_SENSITIVE_FIELDS: frozenset[str] = frozenset(
         "tcp_syn_sent_timeout",
         "tcp_time_wait_timeout",
         "timeout_setting_preference",
+        # WAN health-check target; a bad value can cause false failover decisions.
+        "echo_server",
     }
 )
 
@@ -118,7 +120,8 @@ async def get_gateway_settings() -> Dict[str, Any]:
     "Conntrack timeouts (int seconds): icmp_timeout, other_timeout, udp_stream_timeout, "
     "udp_other_timeout, tcp_established_timeout, tcp_close_timeout, tcp_close_wait_timeout, "
     "tcp_fin_wait_timeout, tcp_last_ack_timeout, tcp_syn_recv_timeout, tcp_syn_sent_timeout, "
-    "tcp_time_wait_timeout, timeout_setting_preference ('auto'/'manual'). Misc: unbind_wan_monitors (bool). "
+    "tcp_time_wait_timeout, timeout_setting_preference ('auto'/'manual'). Misc: unbind_wan_monitors (bool), "
+    "echo_server (str, connectivity-monitor echo server for WAN failover). "
     "WARNING: changing security/NAT settings (UPnP/NAT-PMP, GeoIP filtering, DNS verification, SYN "
     "cookies, broadcast-ping, ICMP redirects, MSS clamp, offloading, or conntrack timeouts) affects "
     "gateway-wide security/NAT/reachability. Requires confirmation.",
@@ -149,7 +152,10 @@ async def update_gateway_settings(
     if not update_data:
         return {"success": False, "error": "update_data cannot be empty"}
 
-    validated_data = gw_to_update(update_data)
+    try:
+        validated_data = gw_to_update(update_data)
+    except ValueError as e:
+        return {"success": False, "error": f"Invalid gateway settings update data: {e}"}
     if not validated_data:
         return {"success": False, "error": "No valid mutable fields provided for update."}
 

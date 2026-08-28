@@ -1,5 +1,6 @@
 """Tests for the gateway (USG) settings shared model."""
 
+import pytest
 from unifi_core.network.models.gateway_settings import (
     MUTABLE_FIELDS,
     READ_ONLY_FIELDS,
@@ -52,6 +53,7 @@ SAMPLE_USG = {
     "tcp_syn_sent_timeout": 120,
     "tcp_time_wait_timeout": 120,
     "timeout_setting_preference": "auto",
+    "echo_server": "8.8.8.8",
     "unbind_wan_monitors": False,
 }
 
@@ -90,6 +92,10 @@ class TestFromController:
         assert m.icmp_timeout == 30
         assert m.timeout_setting_preference == "auto"
 
+    def test_echo_server_is_preserved(self):
+        m = from_controller(SAMPLE_USG)
+        assert m.echo_server == "8.8.8.8"
+
     def test_module_and_offload_flags(self):
         m = from_controller(SAMPLE_USG)
         assert m.ftp_module is True
@@ -118,8 +124,8 @@ class TestFieldSets:
         assert "site_id" not in MUTABLE_FIELDS
         assert "key" not in MUTABLE_FIELDS
 
-    def test_mutable_count_is_37(self):
-        assert len(MUTABLE_FIELDS) == 37
+    def test_mutable_count_is_38(self):
+        assert len(MUTABLE_FIELDS) == 38
 
     def test_readonly_fields(self):
         assert READ_ONLY_FIELDS == frozenset({"id", "site_id", "key"})
@@ -130,6 +136,7 @@ class TestFieldSets:
             "geo_ip_filtering_enabled",
             "tcp_established_timeout",
             "dns_verification",
+            "echo_server",
             "unbind_wan_monitors",
         ):
             assert f in MUTABLE_FIELDS
@@ -148,3 +155,11 @@ class TestToControllerUpdate:
         partial = {"dns_verification": {"primary_dns_server": "9.9.9.9"}}
         out = to_controller_update(partial)
         assert out == partial
+
+    def test_echo_server_passes_through(self):
+        assert to_controller_update({"echo_server": "1.1.1.1"}) == {"echo_server": "1.1.1.1"}
+
+    @pytest.mark.parametrize("value", (42, True, ["1.1.1.1"]))
+    def test_echo_server_rejects_non_string_values(self, value):
+        with pytest.raises(ValueError):
+            to_controller_update({"echo_server": value})

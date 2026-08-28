@@ -120,6 +120,25 @@ def test_network_serializer_wan_ipv6_fields() -> None:
     assert out["wan_ipv6_dns2"] == "2001:4860:4860::8844"
 
 
+def test_network_serializer_firewall_zone_and_wan_monitor_fields() -> None:
+    from unifi_api.graphql.types.network.network import Network
+
+    raw = {
+        "_id": "wan1",
+        "name": "WAN",
+        "purpose": "wan",
+        "enabled": True,
+        "firewall_zone_id": "zone-v2-1",
+        "wan_sla": "sla-1",
+        "report_wan_event": False,
+    }
+
+    out = Network.from_manager_output(raw).to_dict()
+    assert out["firewall_zone_id"] == "zone-v2-1"
+    assert out["wan_sla"] == "sla-1"
+    assert out["report_wan_event"] is False
+
+
 def test_firewall_rule_serializer_shape() -> None:
     """Phase 6 PR2 Task 22 — projection moved to a Strawberry type. Same dict
     shape contract as the old serializer; verified via Type.to_dict()."""

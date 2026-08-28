@@ -2548,7 +2548,7 @@
       "input_schema": {
         "properties": {
           "network_data": {
-            "description": "Network configuration dict. Required: name (str), purpose (str: 'corporate', 'wan', 'vlan-only', 'vpn-client', 'vpn-server'). 'guest' is rejected because the legacy API can silently place it in the Internal firewall zone; create Hotspot-zone networks in the UniFi UI. Required if purpose != 'vlan-only': ip_subnet (CIDR, e.g. '192.168.1.0/24'). Required if purpose == 'vlan-only': vlan (int 1-4094). Optional: vlan_enabled, vlan, dhcpd_enabled, dhcpd_start, dhcpd_stop, dhcpd_leasetime, domain_name, enabled, network_isolation_enabled, upnp_lan_enabled. See update_network for the full list of supported DHCP/DNS fields.",
+            "description": "Network configuration dict. Required: name (str), purpose (str: 'corporate', 'wan', 'vlan-only', 'vpn-client', 'vpn-server'). 'guest' is rejected because the legacy API can silently place it in the Internal firewall zone; create Hotspot-zone networks in the UniFi UI. Required if purpose != 'vlan-only': ip_subnet (CIDR, e.g. '192.168.1.0/24'). Required if purpose == 'vlan-only': vlan (int 1-4094). Optional: vlan_enabled, vlan, dhcpd_enabled, dhcpd_start, dhcpd_stop, dhcpd_leasetime, domain_name, enabled, network_isolation_enabled, upnp_lan_enabled, firewall_zone_id (V2 firewall-zone ID from unifi_list_firewall_zones; do not pass Integration API UUIDs). See update_network for the full list of supported fields.",
             "type": "object"
           }
         },
@@ -2666,6 +2666,30 @@
           "poe_mode": {
             "description": "PoE mode: 'auto' or 'off'",
             "type": "string"
+          },
+          "stormctrl_bcast_enabled": {
+            "description": "Enable broadcast storm control on ports using this profile",
+            "type": "boolean"
+          },
+          "stormctrl_bcast_rate": {
+            "description": "Broadcast storm-control rate limit in packets per second (0-14,880,000)",
+            "type": "integer"
+          },
+          "stormctrl_mcast_enabled": {
+            "description": "Enable multicast storm control on ports using this profile",
+            "type": "boolean"
+          },
+          "stormctrl_mcast_rate": {
+            "description": "Multicast storm-control rate limit in packets per second (0-14,880,000)",
+            "type": "integer"
+          },
+          "stormctrl_ucast_enabled": {
+            "description": "Enable unknown-unicast storm control on ports using this profile",
+            "type": "boolean"
+          },
+          "stormctrl_ucast_rate": {
+            "description": "Unknown-unicast storm-control rate limit in packets per second (0-14,880,000)",
+            "type": "integer"
           },
           "stp_bpdu_guard_enabled": {
             "description": "Shut the port if it receives a BPDU (Edge ports)",
@@ -6301,7 +6325,7 @@
       "input_schema": {
         "properties": {
           "profile_data": {
-            "description": "Dictionary of fields to update. Pass only the fields you want to change \u2014 current values are automatically preserved. Allowed keys: name, forward ('all'/'native'/'customize'), tagged_vlan_mgmt ('auto'/'block_all'/'custom'), native_networkconf_id, tagged_networkconf_ids (list), excluded_networkconf_ids (list), voice_networkconf_id, isolation (bool), poe_mode ('auto'/'off'/'pasv24'/'passthrough'), stp_port_mode (bool), stp_edge_state ('enabled'/'disabled'), stp_bpdu_guard_enabled (bool), stp_uplink (bool), dot1x_ctrl ('force_authorized'/'auto'/'force_unauthorized'/'mac_based'/'multi_host'). The controller rewrites forward to agree with tagged_vlan_mgmt, so change them together. Port State (Active/Disabled) is a separate controller setting that this tool does not expose",
+            "description": "Dictionary of fields to update. Pass only the fields you want to change \u2014 current values are automatically preserved. Allowed keys: name, forward ('all'/'native'/'customize'), tagged_vlan_mgmt ('auto'/'block_all'/'custom'), native_networkconf_id, tagged_networkconf_ids (list), excluded_networkconf_ids (list), voice_networkconf_id, isolation (bool), poe_mode ('auto'/'off'/'pasv24'/'passthrough'), stp_port_mode (bool), stp_edge_state ('enabled'/'disabled'), stp_bpdu_guard_enabled (bool), stp_uplink (bool), dot1x_ctrl ('force_authorized'/'auto'/'force_unauthorized'/'mac_based'/'multi_host'), stormctrl_bcast_enabled (bool), stormctrl_bcast_rate (int packets/sec, 0-14,880,000), stormctrl_mcast_enabled (bool), stormctrl_mcast_rate (int packets/sec, 0-14,880,000), stormctrl_ucast_enabled (bool), stormctrl_ucast_rate (int packets/sec, 0-14,880,000). The controller rewrites forward to agree with tagged_vlan_mgmt, so change them together. Port State (Active/Disabled) is a separate controller setting that this tool does not expose",
             "type": "object"
           },
           "profile_id": {

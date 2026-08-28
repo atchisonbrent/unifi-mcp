@@ -25,12 +25,24 @@ def test_port_profile_list_serializer_shape() -> None:
         "tagged_networkconf_ids": ["net2"],
         "poe_mode": "auto",
         "isolation": False,
+        "stormctrl_bcast_enabled": True,
+        "stormctrl_bcast_rate": 500,
+        "stormctrl_mcast_enabled": False,
+        "stormctrl_mcast_rate": 1000,
+        "stormctrl_ucast_enabled": True,
+        "stormctrl_ucast_rate": 1500,
     }
     out = PortProfile.from_manager_output(sample).to_dict()
     assert out["id"] == "pp1"
     assert out["name"] == "All-Tagged"
     assert out["poe_mode"] == "auto"
     assert out["tagged_networkconf_ids"] == ["net2"]
+    assert out["stormctrl_bcast_enabled"] is True
+    assert out["stormctrl_bcast_rate"] == 500
+    assert out["stormctrl_mcast_enabled"] is False
+    assert out["stormctrl_mcast_rate"] == 1000
+    assert out["stormctrl_ucast_enabled"] is True
+    assert out["stormctrl_ucast_rate"] == 1500
     assert PortProfile.render_hint("list")["kind"] == "list"
 
 

@@ -29,6 +29,7 @@ def test_gateway_settings_round_trip() -> None:
             "offload_sch": True,
             "tcp_established_timeout": 7440,
             "timeout_setting_preference": "auto",
+            "echo_server": "8.8.8.8",
             "unbind_wan_monitors": False,
         }
 
@@ -49,6 +50,7 @@ def test_gateway_settings_round_trip() -> None:
     assert out["offload_sch"] is True
     assert out["tcp_established_timeout"] == 7440
     assert out["timeout_setting_preference"] == "auto"
+    assert out["echo_server"] == "8.8.8.8"
     assert out["unbind_wan_monitors"] is False
 
 

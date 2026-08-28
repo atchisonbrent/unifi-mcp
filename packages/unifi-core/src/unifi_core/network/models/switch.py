@@ -23,7 +23,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+
+MAX_STORM_CONTROL_RATE_PPS = 14_880_000
 
 # ---------------------------------------------------------------------------
 # Pydantic domain model
@@ -113,6 +115,30 @@ class PortProfile(BaseModel):
         default=None,
         description="802.1X control: force_authorized, auto, force_unauthorized, mac_based, multi_host",
     )
+    stormctrl_bcast_enabled: Optional[bool] = Field(
+        default=None,
+        description="Enable broadcast storm control on ports using this profile",
+    )
+    stormctrl_bcast_rate: Optional[int] = Field(
+        default=None,
+        description="Broadcast storm-control packet-rate limit in packets per second (0-14,880,000)",
+    )
+    stormctrl_mcast_enabled: Optional[bool] = Field(
+        default=None,
+        description="Enable multicast storm control on ports using this profile",
+    )
+    stormctrl_mcast_rate: Optional[int] = Field(
+        default=None,
+        description="Multicast storm-control packet-rate limit in packets per second (0-14,880,000)",
+    )
+    stormctrl_ucast_enabled: Optional[bool] = Field(
+        default=None,
+        description="Enable unknown-unicast storm control on ports using this profile",
+    )
+    stormctrl_ucast_rate: Optional[int] = Field(
+        default=None,
+        description="Unknown-unicast storm-control packet-rate limit in packets per second (0-14,880,000)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +170,21 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+def _validate_write_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Strictly validate mutable port-profile fields before a controller write."""
+    try:
+        model = PortProfile.model_validate(fields, strict=True)
+    except ValidationError as error:
+        raise ValueError(error.errors()[0]["msg"]) from None
+
+    for name in ("stormctrl_bcast_rate", "stormctrl_mcast_rate", "stormctrl_ucast_rate"):
+        value = getattr(model, name)
+        if value is not None and not 0 <= value <= MAX_STORM_CONTROL_RATE_PPS:
+            raise ValueError(f"'{name}' must be between 0 and {MAX_STORM_CONTROL_RATE_PPS} packets per second.")
+
+    return model.model_dump(include=set(fields), exclude_none=True)
+
+
 # ---------------------------------------------------------------------------
 # Public factory helpers
 # ---------------------------------------------------------------------------
@@ -172,6 +213,12 @@ def from_controller(raw: Any) -> PortProfile:
         stp_bpdu_guard_enabled=_get(raw, "stp_bpdu_guard_enabled"),
         stp_uplink=_get(raw, "stp_uplink"),
         dot1x_ctrl=_get(raw, "dot1x_ctrl"),
+        stormctrl_bcast_enabled=_get(raw, "stormctrl_bcast_enabled"),
+        stormctrl_bcast_rate=_get(raw, "stormctrl_bcast_rate"),
+        stormctrl_mcast_enabled=_get(raw, "stormctrl_mcast_enabled"),
+        stormctrl_mcast_rate=_get(raw, "stormctrl_mcast_rate"),
+        stormctrl_ucast_enabled=_get(raw, "stormctrl_ucast_enabled"),
+        stormctrl_ucast_rate=_get(raw, "stormctrl_ucast_rate"),
     )
 
 
@@ -190,6 +237,12 @@ def build_create_payload(
     stp_bpdu_guard_enabled: Optional[bool] = None,
     stp_uplink: Optional[bool] = None,
     dot1x_ctrl: str = "",
+    stormctrl_bcast_enabled: Optional[bool] = None,
+    stormctrl_bcast_rate: Optional[int] = None,
+    stormctrl_mcast_enabled: Optional[bool] = None,
+    stormctrl_mcast_rate: Optional[int] = None,
+    stormctrl_ucast_enabled: Optional[bool] = None,
+    stormctrl_ucast_rate: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Build a controller create payload from the tool's flat parameters.
 
@@ -227,7 +280,19 @@ def build_create_payload(
         payload["stp_uplink"] = stp_uplink
     if dot1x_ctrl:
         payload["dot1x_ctrl"] = dot1x_ctrl
-    return payload
+    if stormctrl_bcast_enabled is not None:
+        payload["stormctrl_bcast_enabled"] = stormctrl_bcast_enabled
+    if stormctrl_bcast_rate is not None:
+        payload["stormctrl_bcast_rate"] = stormctrl_bcast_rate
+    if stormctrl_mcast_enabled is not None:
+        payload["stormctrl_mcast_enabled"] = stormctrl_mcast_enabled
+    if stormctrl_mcast_rate is not None:
+        payload["stormctrl_mcast_rate"] = stormctrl_mcast_rate
+    if stormctrl_ucast_enabled is not None:
+        payload["stormctrl_ucast_enabled"] = stormctrl_ucast_enabled
+    if stormctrl_ucast_rate is not None:
+        payload["stormctrl_ucast_rate"] = stormctrl_ucast_rate
+    return _validate_write_fields(payload)
 
 
 def to_controller_create(model: PortProfile) -> Dict[str, Any]:
@@ -237,7 +302,7 @@ def to_controller_create(model: PortProfile) -> Dict[str, Any]:
         value = getattr(model, field_name, None)
         if value is not None:
             payload[field_name] = value
-    return payload
+    return _validate_write_fields(payload)
 
 
 def to_controller_update(fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -246,4 +311,5 @@ def to_controller_update(fields: Dict[str, Any]) -> Dict[str, Any]:
     Read-only fields and unrecognised keys are dropped.
     ``None`` values are dropped; boolean ``False`` is preserved.
     """
-    return {k: v for k, v in fields.items() if k in MUTABLE_FIELDS and v is not None}
+    accepted = {k: v for k, v in fields.items() if k in MUTABLE_FIELDS and v is not None}
+    return _validate_write_fields(accepted)

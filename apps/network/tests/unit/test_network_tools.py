@@ -361,6 +361,49 @@ class TestUpdateNetworkWanFields:
         assert forwarded == {"wan_smartq_enabled": True}
 
     @pytest.mark.asyncio
+    async def test_confirmed_update_forwards_firewall_zone_and_wan_monitor_fields(self):
+        fields = {
+            "firewall_zone_id": "zone-v2-1",
+            "wan_sla": "sla-1",
+            "report_wan_event": False,
+        }
+        updated = {**SAMPLE_WAN, **fields}
+        with patch("unifi_network_mcp.tools.network.network_manager") as mock_mgr:
+            mock_mgr._connection.site = "default"
+            mock_mgr.get_network_details = AsyncMock(return_value=SAMPLE_WAN)
+            mock_mgr.update_network = AsyncMock(
+                return_value=verify_write(
+                    operation="update",
+                    requested=fields,
+                    before=SAMPLE_WAN,
+                    after=updated,
+                )
+            )
+
+            from unifi_network_mcp.tools.network import update_network
+
+            result = await update_network("wan001", fields, confirm=True)
+
+        assert result["success"] is True
+        mock_mgr.update_network.assert_awaited_once_with("wan001", fields)
+
+    @pytest.mark.asyncio
+    async def test_firewall_zone_preview_warns_about_security_scope(self):
+        with patch("unifi_network_mcp.tools.network.network_manager") as mock_mgr:
+            mock_mgr.get_network_details = AsyncMock(return_value=SAMPLE_NETWORK)
+
+            from unifi_network_mcp.tools.network import update_network
+
+            result = await update_network(
+                "net001",
+                {"firewall_zone_id": "zone-v2-1"},
+                confirm=False,
+            )
+
+        warnings = result.get("warnings") or []
+        assert any("security policies" in warning for warning in warnings)
+
+    @pytest.mark.asyncio
     async def test_wan_preview_warns_on_connectivity_critical(self):
         """confirm=False with a connectivity-critical WAN field surfaces a warning."""
         with patch("unifi_network_mcp.tools.network.network_manager") as mock_mgr:
@@ -422,6 +465,7 @@ class TestUpdateNetworkWanFields:
             "wan_load_balance_type": "weighted",
             "wan_load_balance_weight": 50,
             "wan_failover_priority": 1,
+            "wan_sla": "sla-object-id",
             "wan_vlan_enabled": False,
             "mac_override_enabled": False,
         }

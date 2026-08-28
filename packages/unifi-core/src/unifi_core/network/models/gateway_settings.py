@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 class GatewaySettings(BaseModel):
@@ -118,6 +118,12 @@ class GatewaySettings(BaseModel):
     )
 
     # --- Misc ---
+    echo_server: Optional[str] = Field(
+        default=None,
+        description=(
+            "Connectivity-monitor echo server used for WAN failover health checks (e.g. 'ping.ui.com' or a custom IP)"
+        ),
+    )
     unbind_wan_monitors: Optional[bool] = Field(default=None, description="Unbind WAN uplink monitors.")
 
     @field_validator("geo_ip_filtering_countries", mode="before")
@@ -209,6 +215,7 @@ def from_controller(raw: Any) -> GatewaySettings:
         tcp_syn_sent_timeout=_get(raw, "tcp_syn_sent_timeout"),
         tcp_time_wait_timeout=_get(raw, "tcp_time_wait_timeout"),
         timeout_setting_preference=_get(raw, "timeout_setting_preference"),
+        echo_server=_get(raw, "echo_server"),
         unbind_wan_monitors=_get(raw, "unbind_wan_monitors"),
     )
 
@@ -219,4 +226,9 @@ def to_controller_update(fields: Dict[str, Any]) -> Dict[str, Any]:
     Read-only fields and unrecognised keys are dropped.
     ``None`` values are dropped; boolean ``False`` is preserved.
     """
-    return {k: v for k, v in fields.items() if k in MUTABLE_FIELDS and v is not None}
+    accepted = {k: v for k, v in fields.items() if k in MUTABLE_FIELDS and v is not None}
+    try:
+        model = GatewaySettings.model_validate(accepted, strict=True)
+    except ValidationError as error:
+        raise ValueError(error.errors()[0]["msg"]) from None
+    return model.model_dump(include=set(accepted), exclude_none=True)

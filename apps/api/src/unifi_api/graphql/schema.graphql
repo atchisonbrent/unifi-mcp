@@ -849,6 +849,7 @@ type GatewaySettings {
   tcpSynSentTimeout: Int
   tcpTimeWaitTimeout: Int
   timeoutSettingPreference: String
+  echoServer: String
   unbindWanMonitors: Boolean
 }
 
@@ -1060,12 +1061,21 @@ type Network {
   networkIsolationEnabled: Boolean
   internetAccessEnabled: Boolean
   upnpLanEnabled: Boolean
+
+  """
+  V2 firewall-zone ID. These IDs are scoped to the V2 firewall/network tool family; do not pass Integration API firewall-zone UUIDs.
+  """
+  firewallZoneId: String
   wanType: String
   wanNetworkgroup: String
   wanDnsPreference: String
   wanLoadBalanceType: String
   wanLoadBalanceWeight: Int
   wanFailoverPriority: Int
+
+  """Controller WAN-SLA configuration ID for this uplink."""
+  wanSla: String
+  reportWanEvent: Boolean
   wanSmartqEnabled: Boolean
   wanVlanEnabled: Boolean
   igmpProxyUpstream: Boolean
@@ -1514,6 +1524,12 @@ type PortProfile {
   stpBpduGuardEnabled: Boolean
   stpUplink: Boolean
   dot1xCtrl: String
+  stormctrlBcastEnabled: Boolean
+  stormctrlBcastRate: Int
+  stormctrlMcastEnabled: Boolean
+  stormctrlMcastRate: Int
+  stormctrlUcastEnabled: Boolean
+  stormctrlUcastRate: Int
 }
 
 """Paginated page of switch port profiles."""

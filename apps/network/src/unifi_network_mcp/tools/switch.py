@@ -148,28 +148,61 @@ async def create_port_profile(
     dot1x_ctrl: Annotated[
         str, Field(description="802.1X control: 'force_authorized', 'auto', 'force_unauthorized'")
     ] = "",
+    stormctrl_bcast_enabled: Annotated[
+        Optional[bool],
+        Field(description="Enable broadcast storm control on ports using this profile"),
+    ] = None,
+    stormctrl_bcast_rate: Annotated[
+        Optional[int],
+        Field(description="Broadcast storm-control rate limit in packets per second (0-14,880,000)"),
+    ] = None,
+    stormctrl_mcast_enabled: Annotated[
+        Optional[bool],
+        Field(description="Enable multicast storm control on ports using this profile"),
+    ] = None,
+    stormctrl_mcast_rate: Annotated[
+        Optional[int],
+        Field(description="Multicast storm-control rate limit in packets per second (0-14,880,000)"),
+    ] = None,
+    stormctrl_ucast_enabled: Annotated[
+        Optional[bool],
+        Field(description="Enable unknown-unicast storm control on ports using this profile"),
+    ] = None,
+    stormctrl_ucast_rate: Annotated[
+        Optional[int],
+        Field(description="Unknown-unicast storm-control rate limit in packets per second (0-14,880,000)"),
+    ] = None,
     confirm: Annotated[
         bool,
         Field(description="When true, creates the profile. When false (default), returns a preview"),
     ] = False,
 ) -> Dict[str, Any]:
     """Creates a new port profile."""
-    profile_data = pp_build_create_payload(
-        name=name,
-        forward=forward,
-        native_networkconf_id=native_networkconf_id,
-        tagged_vlan_mgmt=tagged_vlan_mgmt,
-        tagged_networkconf_ids=tagged_networkconf_ids,
-        excluded_networkconf_ids=excluded_networkconf_ids,
-        voice_networkconf_id=voice_networkconf_id,
-        isolation=isolation,
-        poe_mode=poe_mode,
-        stp_port_mode=stp_port_mode,
-        stp_edge_state=stp_edge_state,
-        stp_bpdu_guard_enabled=stp_bpdu_guard_enabled,
-        stp_uplink=stp_uplink,
-        dot1x_ctrl=dot1x_ctrl,
-    )
+    try:
+        profile_data = pp_build_create_payload(
+            name=name,
+            forward=forward,
+            native_networkconf_id=native_networkconf_id,
+            tagged_vlan_mgmt=tagged_vlan_mgmt,
+            tagged_networkconf_ids=tagged_networkconf_ids,
+            excluded_networkconf_ids=excluded_networkconf_ids,
+            voice_networkconf_id=voice_networkconf_id,
+            isolation=isolation,
+            poe_mode=poe_mode,
+            stp_port_mode=stp_port_mode,
+            stp_edge_state=stp_edge_state,
+            stp_bpdu_guard_enabled=stp_bpdu_guard_enabled,
+            stp_uplink=stp_uplink,
+            dot1x_ctrl=dot1x_ctrl,
+            stormctrl_bcast_enabled=stormctrl_bcast_enabled,
+            stormctrl_bcast_rate=stormctrl_bcast_rate,
+            stormctrl_mcast_enabled=stormctrl_mcast_enabled,
+            stormctrl_mcast_rate=stormctrl_mcast_rate,
+            stormctrl_ucast_enabled=stormctrl_ucast_enabled,
+            stormctrl_ucast_rate=stormctrl_ucast_rate,
+        )
+    except ValueError as e:
+        return {"success": False, "error": f"Invalid port profile data: {e}"}
 
     if not confirm:
         return create_preview(
@@ -212,7 +245,10 @@ async def update_port_profile(
             "voice_networkconf_id, isolation (bool), "
             "poe_mode ('auto'/'off'/'pasv24'/'passthrough'), stp_port_mode (bool), "
             "stp_edge_state ('enabled'/'disabled'), stp_bpdu_guard_enabled (bool), stp_uplink (bool), "
-            "dot1x_ctrl ('force_authorized'/'auto'/'force_unauthorized'/'mac_based'/'multi_host'). "
+            "dot1x_ctrl ('force_authorized'/'auto'/'force_unauthorized'/'mac_based'/'multi_host'), "
+            "stormctrl_bcast_enabled (bool), stormctrl_bcast_rate (int packets/sec, 0-14,880,000), "
+            "stormctrl_mcast_enabled (bool), stormctrl_mcast_rate (int packets/sec, 0-14,880,000), "
+            "stormctrl_ucast_enabled (bool), stormctrl_ucast_rate (int packets/sec, 0-14,880,000). "
             "The controller rewrites forward to agree with tagged_vlan_mgmt, so change them together. "
             "Port State (Active/Disabled) is a separate controller setting that this tool does not expose"
         ),
@@ -228,7 +264,10 @@ async def update_port_profile(
     if not profile_data:
         return {"success": False, "error": "profile_data cannot be empty"}
 
-    validated_data = pp_to_update(profile_data)
+    try:
+        validated_data = pp_to_update(profile_data)
+    except ValueError as e:
+        return {"success": False, "error": f"Invalid port profile update data: {e}"}
     # unifi_get_port_profile_details returns the controller's full raw object, so
     # callers routinely round-trip keys this tool cannot write. Name them rather
     # than dropping them silently.

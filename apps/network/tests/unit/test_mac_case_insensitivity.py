@@ -39,6 +39,11 @@ def mock_connection():
     conn.controller.devices = MagicMock()
     conn.controller.devices.update = AsyncMock()
     conn.controller.devices.values = MagicMock(return_value=[])
+
+    async def _refresh_handler(name, _c=conn):
+        return await getattr(_c.controller, name).update()
+
+    conn.refresh_handler = _refresh_handler
     conn.request = AsyncMock(return_value=None)
     return conn
 

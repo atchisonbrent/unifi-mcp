@@ -19,6 +19,14 @@ def mock_connection():
     conn._update_cache = MagicMock()
     conn._invalidate_cache = MagicMock()
     conn.ensure_connected = AsyncMock(return_value=True)
+
+    # ConnectionManager.refresh_handler() is how the managers refresh a
+    # handler collection now; delegate to the same ``update()`` these
+    # tests already stub so their setup keeps its meaning.
+    async def _refresh_handler(name, _c=conn):
+        return await getattr(_c.controller, name).update()
+
+    conn.refresh_handler = _refresh_handler
     conn.controller = MagicMock()
     conn.controller.clients = MagicMock()
     conn.controller.clients.update = AsyncMock()

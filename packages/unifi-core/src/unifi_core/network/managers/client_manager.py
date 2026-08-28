@@ -43,7 +43,7 @@ class ClientManager:
             return cached_data
 
         try:
-            await self._connection.controller.clients.update()
+            await self._connection.refresh_handler("clients")
             clients: List[Client] = list(self._connection.controller.clients.values())
             # Fallback rationale:
             # - Some controller models/versions may not populate the collection
@@ -76,7 +76,7 @@ class ClientManager:
             return cached_data
 
         try:
-            await self._connection.controller.clients_all.update()
+            await self._connection.refresh_handler("clients_all")
             all_clients: List[Client] = list(self._connection.controller.clients_all.values())
             # Fallback rationale:
             # - When the clients_all collection is empty, query the canonical

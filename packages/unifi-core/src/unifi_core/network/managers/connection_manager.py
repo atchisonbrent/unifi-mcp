@@ -617,6 +617,45 @@ class ConnectionManager:
         """Close the connection using the common manager lifecycle contract."""
         await self.cleanup()
 
+    async def refresh_handler(self, name: str) -> Any:
+        """Refresh an aiounifi handler collection, recovering an expired session.
+
+        ``request()`` is not the only way this project reaches the controller:
+        the device, client and DPI collections are refreshed through their
+        aiounifi handler's own ``update()``, which builds and issues its request
+        internally. ``LoginRequired`` therefore propagates past ``request()``'s
+        recovery entirely, and an expired session surfaced to the caller as a
+        bare 401 with no login ever attempted (#500).
+
+        The handler is resolved by *name* rather than passed in, so the retry
+        reads it off ``self.controller`` again — the same reason ``request()``
+        re-derives its request method after re-authenticating.
+        """
+        if not await self.ensure_connected() or not self.controller:
+            raise self._not_connected_error()
+
+        auth_generation = self._auth_generation
+        try:
+            return await getattr(self.controller, name).update()
+        except LoginRequired:
+            logger.warning("Login required detected during %s refresh, attempting explicit re-authentication...", name)
+            if not await self._reauthenticate(auth_generation):
+                raise
+            if not self.controller:
+                raise ConnectionError("Re-authentication failed, controller not available.")
+            logger.info("Re-authentication successful, retrying %s refresh...", name)
+            try:
+                return await getattr(self.controller, name).update()
+            except LoginRequired as retry_error:
+                # Same terminal treatment ``request()`` applies: a second
+                # LoginRequired means the refreshed session was rejected, so
+                # stop here rather than let every later tool call start another
+                # controller login.
+                logger.error("%s refresh failed even after re-authentication: %s", name, retry_error)
+                self._block_automatic_reconnect(retry_error)
+                await self._discard_connection()
+                raise
+
     async def request(self, api_request: ApiRequest | ApiRequestV2, return_raw: bool = False) -> Any:
         """Make a request to the controller API, handling raw responses."""
         if not await self.ensure_connected() or not self.controller:

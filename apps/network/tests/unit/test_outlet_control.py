@@ -131,6 +131,14 @@ def mock_connection():
     conn.controller.devices.update = AsyncMock()
     conn.controller.devices.values = MagicMock(return_value=[])
     conn.ensure_connected = AsyncMock(return_value=True)
+
+    # ConnectionManager.refresh_handler() is how the managers refresh a
+    # handler collection now; delegate to the same ``update()`` these
+    # tests already stub so their setup keeps its meaning.
+    async def _refresh_handler(name, _c=conn):
+        return await getattr(_c.controller, name).update()
+
+    conn.refresh_handler = _refresh_handler
     return conn
 
 

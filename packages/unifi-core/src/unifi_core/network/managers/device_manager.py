@@ -39,7 +39,7 @@ class DeviceManager:
             return cached_data
 
         try:
-            await self._connection.controller.devices.update()
+            await self._connection.refresh_handler("devices")
             devices: List[Device] = list(self._connection.controller.devices.values())
             self._connection._update_cache(cache_key, devices)
             return devices

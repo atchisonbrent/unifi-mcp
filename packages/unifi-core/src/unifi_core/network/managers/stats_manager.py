@@ -328,8 +328,8 @@ class StatsManager:
             raise ConnectionError("Not connected to controller")
 
         try:
-            await self._connection.controller.dpi_apps.update()
-            await self._connection.controller.dpi_groups.update()
+            await self._connection.refresh_handler("dpi_apps")
+            await self._connection.refresh_handler("dpi_groups")
 
             dpi_apps: List[DPIRestrictionApp] = list(self._connection.controller.dpi_apps.values())
             dpi_groups: List[DPIRestrictionGroup] = list(self._connection.controller.dpi_groups.values())

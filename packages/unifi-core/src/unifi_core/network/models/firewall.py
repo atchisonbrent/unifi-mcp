@@ -7,7 +7,7 @@ Mirrors the Strawberry types in
   Mutable fields per FIREWALL_POLICY_V2_CREATE_SCHEMA.
 - ``FirewallGroup`` — create/delete for firewall address/port groups.
   Mutable fields: name, group_type, members.
-- ``FirewallZone``  — read-only zone shape (no mutable fields).
+- ``FirewallZone``  — zone shape with a mutable display name.
 - ``LegacyFirewallRule`` — read-only pre-zone-based rule shape. The legacy
   engine uses different field names, lowercase actions, and flat
   source/destination fields, so it cannot share ``FirewallRule``.
@@ -191,26 +191,25 @@ FIREWALLGROUP_READ_ONLY_FIELDS: frozenset[str] = frozenset(
 
 
 # ---------------------------------------------------------------------------
-# FirewallZone pydantic model (read-only)
+# FirewallZone pydantic model
 # ---------------------------------------------------------------------------
 
 
 class FirewallZone(BaseModel):
-    """Canonical firewall zone model (read-only)."""
+    """Canonical firewall zone model (mutable name only)."""
 
     id: Optional[str] = Field(
         default=None,
-        description="Zone UUID",
+        description="V2 controller firewall-zone ObjectID (not an Integration API UUID)",
         json_schema_extra={"mutable": False},
     )
     name: Optional[str] = Field(
         default=None,
         description="Zone display name",
-        json_schema_extra={"mutable": False},
     )
     networks: Optional[List[Any]] = Field(
         default=None,
-        description="Network IDs assigned to this zone",
+        description="Network IDs assigned to this zone (managed via network firewall_zone_id)",
         json_schema_extra={"mutable": False},
     )
     default_policy: Optional[str] = Field(
@@ -220,9 +219,11 @@ class FirewallZone(BaseModel):
     )
 
 
-FIREWALLZONE_MUTABLE_FIELDS: frozenset[str] = frozenset()
+FIREWALLZONE_MUTABLE_FIELDS: frozenset[str] = frozenset({"name"})
 
-FIREWALLZONE_READ_ONLY_FIELDS: frozenset[str] = frozenset(FirewallZone.model_fields.keys())
+FIREWALLZONE_READ_ONLY_FIELDS: frozenset[str] = frozenset(
+    name for name in FirewallZone.model_fields.keys() if name not in FIREWALLZONE_MUTABLE_FIELDS
+)
 
 
 # ---------------------------------------------------------------------------
@@ -622,6 +623,28 @@ def firewall_zone_from_controller(raw: Any) -> FirewallZone:
         networks=list(networks),
         default_policy=_get(raw, "default_policy") or _get(raw, "default_action"),
     )
+
+
+def to_zone_create(model: FirewallZone) -> Dict[str, Any]:
+    """Produce an integration-API create payload for a firewall zone.
+
+    The integration API rejects a missing/``null`` ``networkIds``, so a new
+    zone is always created with an empty membership; networks join via the
+    network-level ``firewall_zone_id`` field instead.
+    """
+    return {
+        "name": model.name,
+        "networkIds": [],
+    }
+
+
+def to_zone_update(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Filter a partial dict to the mutable firewall-zone keys only.
+
+    ``name`` is the only writable field; ``None`` values and unrecognised keys
+    are dropped.
+    """
+    return {k: v for k, v in fields.items() if k in FIREWALLZONE_MUTABLE_FIELDS and v is not None}
 
 
 def _str_list(value: Any) -> List[str]:

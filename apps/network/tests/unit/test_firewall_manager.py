@@ -7,7 +7,7 @@ endpoint with deep_merge.
 
 import copy
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -924,3 +924,361 @@ class TestDeletePortForward:
 
         with pytest.raises(RuntimeError, match="boom"):
             await firewall_manager.delete_port_forward("pf_001")
+
+
+class TestFirewallZoneCrud:
+    """Zone writes go through the integration API with a V2 _id ↔ UUID bridge."""
+
+    @pytest.fixture(autouse=True)
+    def _api_key_auth(self, firewall_manager):
+        firewall_manager._auth = MagicMock(has_api_key=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["create", "update", "delete"])
+    async def test_mutations_require_api_key_before_controller_io(self, firewall_manager, operation):
+        firewall_manager._auth = None
+        if operation == "create":
+            call = firewall_manager.create_firewall_zone("IoT")
+        elif operation == "update":
+            call = firewall_manager.update_firewall_zone("z1", "Devices")
+        else:
+            call = firewall_manager.delete_firewall_zone("z1")
+
+        with pytest.raises(RuntimeError, match="requires a UniFi API key"):
+            await call
+
+        firewall_manager._connection.ensure_connected.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_ids_do_not_match_literal_none(self, firewall_manager):
+        from unifi_core.exceptions import UniFiNotFoundError
+
+        with patch.object(
+            firewall_manager,
+            "_get_v2_zones_full",
+            new_callable=AsyncMock,
+            return_value=[{"name": "Missing IDs"}, {"_id": "real-zone", "name": "Real"}],
+        ):
+            with pytest.raises(UniFiNotFoundError):
+                await firewall_manager.get_firewall_zone_by_id("None")
+
+    @pytest.mark.asyncio
+    async def test_integration_zone_listing_fetches_all_pages(self, firewall_manager):
+        with patch.object(
+            firewall_manager,
+            "_request_integration_api",
+            new_callable=AsyncMock,
+            side_effect=[
+                {"data": [{"id": "uuid-1"}], "totalCount": 2},
+                {"data": [{"id": "uuid-2"}], "totalCount": 2},
+            ],
+        ) as request:
+            zones = await firewall_manager._get_integration_firewall_zones("sid")
+
+        assert zones == [{"id": "uuid-1"}, {"id": "uuid-2"}]
+        assert request.await_args_list == [
+            call(
+                "get",
+                "/v1/sites/sid/firewall/zones",
+                params={"limit": "200", "offset": "0"},
+            ),
+            call(
+                "get",
+                "/v1/sites/sid/firewall/zones",
+                params={"limit": "200", "offset": "1"},
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_delete_refuses_system_zone(self, firewall_manager):
+        from unifi_core.exceptions import UniFiOperationError
+
+        with patch.object(
+            firewall_manager,
+            "_get_v2_zones_full",
+            new_callable=AsyncMock,
+            return_value=[{"_id": "z1", "name": "Internal", "external_id": "uuid-1", "default_zone": True}],
+        ):
+            with pytest.raises(UniFiOperationError):
+                await firewall_manager.delete_firewall_zone("z1")
+
+    @pytest.mark.asyncio
+    async def test_update_refuses_system_zone(self, firewall_manager):
+        from unifi_core.exceptions import UniFiOperationError
+
+        with patch.object(
+            firewall_manager,
+            "_get_v2_zones_full",
+            new_callable=AsyncMock,
+            return_value=[{"_id": "z1", "name": "Internal", "external_id": "uuid-1", "default_zone": True}],
+        ):
+            with pytest.raises(UniFiOperationError):
+                await firewall_manager.update_firewall_zone("z1", "Renamed")
+
+    @pytest.mark.asyncio
+    async def test_delete_happy_path(self, firewall_manager):
+        with (
+            patch.object(firewall_manager, "_get_integration_site_id", new_callable=AsyncMock, return_value="sid"),
+            patch.object(
+                firewall_manager,
+                "_get_v2_zones_full",
+                new_callable=AsyncMock,
+                side_effect=[
+                    [{"_id": "z1", "name": "IoT", "external_id": "uuid-1", "default_zone": False}],
+                    [],
+                ],
+            ),
+            patch.object(
+                firewall_manager,
+                "_get_integration_firewall_zones",
+                new_callable=AsyncMock,
+                side_effect=[
+                    [{"id": "uuid-1", "name": "IoT", "networkIds": []}],
+                    [],
+                ],
+            ),
+            patch.object(
+                firewall_manager,
+                "_request_integration_api",
+                new_callable=AsyncMock,
+                return_value={},
+            ) as request,
+        ):
+            result = await firewall_manager.delete_firewall_zone("z1")
+
+        assert result is True
+        request.assert_awaited_once_with("delete", "/v1/sites/sid/firewall/zones/uuid-1")
+        firewall_manager._connection._invalidate_cache.assert_any_call("integration_firewall_zones_sid")
+        firewall_manager._connection._invalidate_cache.assert_any_call("firewall_policy_ordering")
+
+    @pytest.mark.asyncio
+    async def test_update_preserves_integration_api_network_ids(self, firewall_manager):
+        with (
+            patch.object(firewall_manager, "_get_integration_site_id", new_callable=AsyncMock, return_value="sid"),
+            patch.object(
+                firewall_manager,
+                "_get_v2_zones_full",
+                new_callable=AsyncMock,
+                side_effect=[
+                    [
+                        {
+                            "_id": "v2-zone",
+                            "name": "IoT",
+                            "external_id": "integration-zone",
+                            # This is deliberately a V2 identifier and must not be written.
+                            "network_ids": ["v2-network-id"],
+                        }
+                    ],
+                    [
+                        {
+                            "_id": "v2-zone",
+                            "name": "Devices",
+                            "external_id": "integration-zone",
+                            "network_ids": ["v2-network-id"],
+                        }
+                    ],
+                ],
+            ),
+            patch.object(
+                firewall_manager,
+                "_get_integration_firewall_zones",
+                new_callable=AsyncMock,
+                side_effect=[
+                    [
+                        {
+                            "id": "integration-zone",
+                            "name": "IoT",
+                            "networkIds": ["integration-network-uuid"],
+                        }
+                    ],
+                    [
+                        {
+                            "id": "integration-zone",
+                            "name": "Devices",
+                            "networkIds": ["integration-network-uuid"],
+                        }
+                    ],
+                ],
+            ),
+            patch.object(
+                firewall_manager,
+                "_request_integration_api",
+                new_callable=AsyncMock,
+                return_value={},
+            ) as request,
+        ):
+            result = await firewall_manager.update_firewall_zone("v2-zone", "Devices")
+
+        assert result is True
+        request.assert_awaited_once_with(
+            "put",
+            "/v1/sites/sid/firewall/zones/integration-zone",
+            data={"name": "Devices", "networkIds": ["integration-network-uuid"]},
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_aborts_when_integration_membership_is_missing(self, firewall_manager):
+        from unifi_core.exceptions import UniFiOperationError
+
+        with (
+            patch.object(firewall_manager, "_get_integration_site_id", new_callable=AsyncMock, return_value="sid"),
+            patch.object(
+                firewall_manager,
+                "_get_v2_zones_full",
+                new_callable=AsyncMock,
+                return_value=[{"_id": "v2-zone", "name": "IoT", "external_id": "integration-zone"}],
+            ),
+            patch.object(
+                firewall_manager,
+                "_get_integration_firewall_zones",
+                new_callable=AsyncMock,
+                return_value=[{"id": "integration-zone", "name": "IoT"}],
+            ),
+            patch.object(firewall_manager, "_request_integration_api", new_callable=AsyncMock) as request,
+        ):
+            with pytest.raises(UniFiOperationError, match="did not include networkIds"):
+                await firewall_manager.update_firewall_zone("v2-zone", "Devices")
+
+        request.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_rejects_controller_noop(self, firewall_manager):
+        from unifi_core.exceptions import UniFiOperationError
+
+        v2_zone = {"_id": "v2-zone", "name": "IoT", "external_id": "integration-zone"}
+        integration_zone = {
+            "id": "integration-zone",
+            "name": "IoT",
+            "networkIds": ["integration-network-uuid"],
+        }
+        with (
+            patch.object(firewall_manager, "_get_integration_site_id", new_callable=AsyncMock, return_value="sid"),
+            patch.object(
+                firewall_manager,
+                "_get_v2_zones_full",
+                new_callable=AsyncMock,
+                return_value=[v2_zone],
+            ),
+            patch.object(
+                firewall_manager,
+                "_get_integration_firewall_zones",
+                new_callable=AsyncMock,
+                return_value=[integration_zone],
+            ),
+            patch.object(firewall_manager, "_request_integration_api", new_callable=AsyncMock, return_value={}),
+            patch(
+                "unifi_core.network.managers.firewall_manager.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            with pytest.raises(UniFiOperationError, match="did not persist firewall zone rename"):
+                await firewall_manager.update_firewall_zone("v2-zone", "Devices")
+
+    @pytest.mark.asyncio
+    async def test_delete_rejects_controller_noop(self, firewall_manager):
+        from unifi_core.exceptions import UniFiOperationError
+
+        v2_zone = {
+            "_id": "v2-zone",
+            "name": "IoT",
+            "external_id": "integration-zone",
+            "default_zone": False,
+        }
+        integration_zone = {"id": "integration-zone", "name": "IoT", "networkIds": []}
+        with (
+            patch.object(firewall_manager, "_get_integration_site_id", new_callable=AsyncMock, return_value="sid"),
+            patch.object(
+                firewall_manager,
+                "_get_v2_zones_full",
+                new_callable=AsyncMock,
+                return_value=[v2_zone],
+            ),
+            patch.object(
+                firewall_manager,
+                "_get_integration_firewall_zones",
+                new_callable=AsyncMock,
+                return_value=[integration_zone],
+            ),
+            patch.object(firewall_manager, "_request_integration_api", new_callable=AsyncMock, return_value={}),
+            patch(
+                "unifi_core.network.managers.firewall_manager.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            with pytest.raises(UniFiOperationError, match="is still present"):
+                await firewall_manager.delete_firewall_zone("v2-zone")
+
+    def test_zone_bridge_fails_closed_instead_of_using_v2_id(self, firewall_manager):
+        from unifi_core.exceptions import UniFiOperationError
+
+        with pytest.raises(UniFiOperationError, match="Could not map V2 firewall zone"):
+            firewall_manager._resolve_integration_zone_record(
+                {"_id": "v2-zone", "name": "IoT"},
+                [{"id": "different-integration-zone", "name": "Guest", "networkIds": []}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_create_reads_back_v2_id(self, firewall_manager):
+        with (
+            patch.object(firewall_manager, "_get_integration_site_id", new_callable=AsyncMock, return_value="sid"),
+            patch.object(
+                firewall_manager,
+                "_request_integration_api",
+                new_callable=AsyncMock,
+                return_value={"id": "uuid-new", "name": "IoT"},
+            ),
+            patch.object(
+                firewall_manager,
+                "_get_v2_zones_full",
+                new_callable=AsyncMock,
+                return_value=[{"_id": "znew", "name": "IoT", "external_id": "uuid-new", "default_zone": False}],
+            ),
+        ):
+            zone = await firewall_manager.create_firewall_zone("IoT")
+
+        assert zone["_id"] == "znew"
+        firewall_manager._connection._invalidate_cache.assert_any_call("integration_firewall_zones_sid")
+        firewall_manager._connection._invalidate_cache.assert_any_call("firewall_policy_ordering")
+
+    @pytest.mark.asyncio
+    async def test_create_missing_v2_readback_raises(self, firewall_manager):
+        with (
+            patch.object(firewall_manager, "_get_integration_site_id", new_callable=AsyncMock, return_value="sid"),
+            patch.object(
+                firewall_manager,
+                "_request_integration_api",
+                new_callable=AsyncMock,
+                return_value={"id": "uuid-new"},
+            ),
+            patch.object(firewall_manager, "_get_v2_zones_full", new_callable=AsyncMock, return_value=[]),
+        ):
+            from unifi_core.exceptions import UniFiOperationError
+
+            with pytest.raises(UniFiOperationError):
+                await firewall_manager.create_firewall_zone("IoT")
+
+    @pytest.mark.asyncio
+    async def test_create_retries_delayed_v2_readback(self, firewall_manager):
+        with (
+            patch.object(firewall_manager, "_get_integration_site_id", new_callable=AsyncMock, return_value="sid"),
+            patch.object(
+                firewall_manager,
+                "_request_integration_api",
+                new_callable=AsyncMock,
+                return_value={"id": "uuid-new"},
+            ),
+            patch.object(
+                firewall_manager,
+                "_get_v2_zones_full",
+                new_callable=AsyncMock,
+                side_effect=[[], [{"_id": "znew", "name": "IoT", "external_id": "uuid-new"}]],
+            ),
+            patch(
+                "unifi_core.network.managers.firewall_manager.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as sleep,
+        ):
+            zone = await firewall_manager.create_firewall_zone("IoT")
+
+        assert zone["_id"] == "znew"
+        sleep.assert_awaited_once()

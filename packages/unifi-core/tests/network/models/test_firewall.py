@@ -25,6 +25,8 @@ from unifi_core.network.models.firewall import (
     normalize_policy_update,
     to_controller_update,
     to_group_create,
+    to_zone_create,
+    to_zone_update,
 )
 
 
@@ -258,12 +260,32 @@ class TestToGroupCreate:
 
 
 class TestFirewallZoneFieldSets:
-    def test_all_fields_read_only(self) -> None:
-        assert not FIREWALLZONE_MUTABLE_FIELDS
+    def test_name_is_mutable(self) -> None:
+        assert FIREWALLZONE_MUTABLE_FIELDS == frozenset({"name"})
 
-    def test_read_only_contains_all_fields(self) -> None:
+    def test_read_only_excludes_name(self) -> None:
         all_fields = frozenset(FirewallZone.model_fields.keys())
-        assert FIREWALLZONE_READ_ONLY_FIELDS == all_fields
+        assert FIREWALLZONE_READ_ONLY_FIELDS == all_fields - FIREWALLZONE_MUTABLE_FIELDS
+        assert "name" not in FIREWALLZONE_READ_ONLY_FIELDS
+        assert "id" in FIREWALLZONE_READ_ONLY_FIELDS
+        assert "networks" in FIREWALLZONE_READ_ONLY_FIELDS
+
+
+class TestFirewallZoneCreateUpdate:
+    def test_to_zone_create_includes_empty_network_ids(self) -> None:
+        payload = to_zone_create(FirewallZone(name="IoT"))
+        assert payload == {"name": "IoT", "networkIds": []}
+
+    def test_to_zone_create_never_writes_read_only_networks(self) -> None:
+        payload = to_zone_create(FirewallZone(name="IoT", networks=["n1", "n2"]))
+        assert payload == {"name": "IoT", "networkIds": []}
+
+    def test_to_zone_update_filters_to_name(self) -> None:
+        result = to_zone_update({"name": "IoT", "id": "x", "networks": []})
+        assert result == {"name": "IoT"}
+
+    def test_to_zone_update_drops_none(self) -> None:
+        assert to_zone_update({"name": None}) == {}
 
 
 class TestFirewallZoneFromController:

@@ -40,7 +40,11 @@ class AccessLocation(BaseModel):
 class AccessDevice(BaseModel):
     """Canonical Access device model (read-only)."""
 
-    id: Optional[str] = Field(default=None, description="Device UUID", json_schema_extra={"mutable": False})
+    id: Optional[str] = Field(
+        default=None,
+        description="Device identifier (MAC on the Integration API path; topology unique ID on the proxy path)",
+        json_schema_extra={"mutable": False},
+    )
     name: Optional[str] = Field(default=None, description="Device display name", json_schema_extra={"mutable": False})
     type: Optional[str] = Field(
         default=None, description="Device type (hub, reader, relay, intercom)", json_schema_extra={"mutable": False}
@@ -51,6 +55,8 @@ class AccessDevice(BaseModel):
     firmware_version: Optional[str] = Field(
         default=None, description="Installed firmware version string", json_schema_extra={"mutable": False}
     )
+    mac: Optional[str] = Field(default=None, description="Device MAC address", json_schema_extra={"mutable": False})
+    ip: Optional[str] = Field(default=None, description="Device IP address", json_schema_extra={"mutable": False})
     location: Optional[AccessLocation] = Field(
         default=None,
         description="Location reference (door/floor/building) this device is mounted at",
@@ -97,11 +103,18 @@ def _coerce_location(raw: Any) -> Optional[AccessLocation]:
 
 def from_controller(raw: Any) -> AccessDevice:
     """Build an AccessDevice from a manager dict or object."""
+    is_online = _get(raw, "is_online")
+    if is_online is None:
+        is_online = _get(raw, "connected")
+    if is_online is None:
+        is_online = _get(raw, "is_connected")
     return AccessDevice(
-        id=_get(raw, "id"),
-        name=_get(raw, "name"),
-        type=_get(raw, "type"),
-        is_online=_get(raw, "is_online"),
-        firmware_version=_get(raw, "firmware_version"),
-        location=_coerce_location(_get(raw, "location")),
+        id=_get(raw, "id") or _get(raw, "unique_id"),
+        name=_get(raw, "name") or _get(raw, "alias"),
+        type=_get(raw, "type") or _get(raw, "device_type"),
+        is_online=is_online,
+        firmware_version=_get(raw, "firmware_version") or _get(raw, "firmware"),
+        mac=_get(raw, "mac"),
+        ip=_get(raw, "ip"),
+        location=_coerce_location(_get(raw, "location") or _get(raw, "_door_name")),
     )

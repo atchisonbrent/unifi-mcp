@@ -89,6 +89,8 @@ class AccessDevice:
     type: str | None
     is_online: bool | None
     firmware_version: str | None
+    mac: str | None
+    ip: str | None
     location: AccessLocation | None
 
     @classmethod
@@ -107,6 +109,8 @@ class AccessDevice:
             type=_get(obj, "type") or _get(obj, "device_type"),
             is_online=_is_online(obj),
             firmware_version=_get(obj, "firmware_version") or _get(obj, "firmware"),
+            mac=_get(obj, "mac"),
+            ip=_get(obj, "ip"),
             location=AccessLocation.from_manager_output(_get(obj, "location") or _get(obj, "_door_name")),
         )
 

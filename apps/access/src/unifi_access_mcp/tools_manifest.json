@@ -741,7 +741,7 @@
         "input": {
           "properties": {
             "device_id": {
-              "description": "Device UUID (from access_list_devices)",
+              "description": "Device identifier returned as 'id' by access_list_devices. This is a MAC address on the Integration API path and an Access topology unique ID on the local proxy path.",
               "type": "string"
             }
           },
@@ -835,7 +835,7 @@
         "input": {
           "properties": {
             "device_id": {
-              "description": "Device UUID (from access_list_devices)",
+              "description": "Device identifier returned as 'id' by access_list_devices. This is a MAC address on the Integration API path and an Access topology unique ID on the local proxy path.",
               "type": "string"
             }
           },
@@ -2541,7 +2541,7 @@
               "type": "boolean"
             },
             "device_id": {
-              "description": "Device UUID (from access_list_devices)",
+              "description": "Device identifier returned as 'id' by access_list_devices. This is a MAC address on the Integration API path and an Access topology unique ID on the local proxy path.",
               "type": "string"
             }
           },
@@ -3083,7 +3083,7 @@
               "type": "boolean"
             },
             "device_id": {
-              "description": "Device UUID (from access_list_devices)",
+              "description": "Device identifier returned as 'id' by access_list_devices. This is a MAC address on the Integration API path and an Access topology unique ID on the local proxy path.",
               "type": "string"
             },
             "is_camera": {

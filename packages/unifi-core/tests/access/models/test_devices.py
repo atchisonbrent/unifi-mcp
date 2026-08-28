@@ -20,7 +20,7 @@ class TestFieldSets:
         assert READ_ONLY_FIELDS == all_fields
 
     def test_read_only_contains_expected(self) -> None:
-        for field in ("id", "name", "type", "is_online", "firmware_version", "location"):
+        for field in ("id", "name", "type", "is_online", "firmware_version", "mac", "ip", "location"):
             assert field in READ_ONLY_FIELDS, f"Expected {field!r} in READ_ONLY_FIELDS"
 
     def test_mutable_and_read_only_are_disjoint(self) -> None:
@@ -41,6 +41,8 @@ class TestFromController:
             "type": "UA-Reader-Pro",
             "is_online": True,
             "firmware_version": "3.2.7",
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "ip": "192.168.1.20",
             "location": {
                 "unique_id": "loc-uuid-1",
                 "name": "Front Door",
@@ -56,6 +58,8 @@ class TestFromController:
         assert d.type == "UA-Reader-Pro"
         assert d.is_online is True
         assert d.firmware_version == "3.2.7"
+        assert d.mac == "aa:bb:cc:dd:ee:ff"
+        assert d.ip == "192.168.1.20"
         assert isinstance(d.location, AccessLocation)
         assert d.location.unique_id == "loc-uuid-1"
         assert d.location.name == "Front Door"
@@ -83,11 +87,39 @@ class TestFromController:
         assert d.type is None
         assert d.is_online is None
         assert d.firmware_version is None
+        assert d.mac is None
+        assert d.ip is None
         assert d.location is None
 
     def test_is_online_false_preserved(self) -> None:
         d = from_controller({"id": "dev-2", "is_online": False})
         assert d.is_online is False
+
+    def test_proxy_shape_is_projected_without_losing_identity(self) -> None:
+        d = from_controller(
+            {
+                "unique_id": "Device-ABC",
+                "alias": "Side Reader",
+                "device_type": "UA-G3",
+                "is_connected": False,
+                "firmware": "3.17.11",
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "ip": "192.168.1.21",
+                "_door_name": "Side Door",
+            }
+        )
+
+        assert d.id == "Device-ABC"
+        assert d.name == "Side Reader"
+        assert d.type == "UA-G3"
+        assert d.is_online is False
+        assert d.firmware_version == "3.17.11"
+        assert d.mac == "AA:BB:CC:DD:EE:FF"
+        assert d.ip == "192.168.1.21"
+        assert d.location == AccessLocation(name="Side Door")
+
+    def test_api_connected_field_maps_to_is_online(self) -> None:
+        assert from_controller({"id": "aa:bb:cc:dd:ee:ff", "connected": False}).is_online is False
 
     def test_handles_partial_dict(self) -> None:
         d = from_controller({"id": "dev-3", "name": "Garage Hub", "type": "UA-Hub"})

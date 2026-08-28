@@ -102,6 +102,8 @@ def test_access_device_serializer_shape() -> None:
         "device_type": "UA-G2",
         "is_online": True,
         "firmware": "2.10.0",
+        "mac": "AA:BB:CC:DD:EE:FF",
+        "ip": "192.168.1.20",
         "_door_name": "Front Door",
     }
     out = AccessDevice.from_manager_output(sample).to_dict()
@@ -110,6 +112,8 @@ def test_access_device_serializer_shape() -> None:
     assert out["type"] == "UA-G2"
     assert out["is_online"] is True
     assert out["firmware_version"] == "2.10.0"
+    assert out["mac"] == "AA:BB:CC:DD:EE:FF"
+    assert out["ip"] == "192.168.1.20"
     # location is now a structured AccessLocation object; the proxy-path
     # ``_door_name`` string maps to its ``name`` field.
     assert out["location"] == {

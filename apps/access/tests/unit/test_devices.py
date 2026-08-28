@@ -76,16 +76,27 @@ def device_mgr_none(cm_none):
 class TestListDevices:
     @pytest.mark.asyncio
     async def test_list_devices_api(self, device_mgr_api, cm_api):
-        mock_device = Device(id="dev-1", name="Hub Pro", type="hub", is_online=True)
+        mock_device = Device.model_validate(
+            {
+                "id": "aa:bb:cc:dd:ee:ff",
+                "name": "Hub Pro",
+                "type": "hub",
+                "is_online": True,
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "ip": "192.168.1.20",
+            }
+        )
 
         cm_api._api_client.get_devices.return_value = [mock_device]
 
         devices = await device_mgr_api.list_devices()
 
         assert len(devices) == 1
-        assert devices[0]["id"] == "dev-1"
+        assert devices[0]["id"] == "aa:bb:cc:dd:ee:ff"
         assert devices[0]["name"] == "Hub Pro"
         assert devices[0]["connected"] is True
+        assert devices[0]["mac"] == "AA:BB:CC:DD:EE:FF"
+        assert devices[0]["ip"] == "192.168.1.20"
 
     @pytest.mark.asyncio
     async def test_list_devices_proxy(self, device_mgr_proxy, cm_proxy):
@@ -567,6 +578,67 @@ class TestApplyUpdateDeviceConfig:
 # ---------------------------------------------------------------------------
 # MCP tool layer: access_get_device_configs / access_update_device_config
 # ---------------------------------------------------------------------------
+
+
+class TestReadDeviceTools:
+    @pytest.mark.asyncio
+    async def test_list_preserves_api_identity_and_status_fields(self):
+        raw = {
+            "id": "aa:bb:cc:dd:ee:ff",
+            "name": "Entry Reader",
+            "type": "reader",
+            "connected": False,
+            "firmware_version": "3.2.7",
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "ip": "192.168.1.20",
+        }
+        with patch("unifi_access_mcp.tools.devices.device_manager") as mock_mgr:
+            mock_mgr.list_devices = AsyncMock(return_value=[raw])
+            from unifi_access_mcp.tools.devices import access_list_devices
+
+            result = await access_list_devices()
+
+        assert result == {
+            "success": True,
+            "data": {
+                "devices": [
+                    {
+                        "id": "aa:bb:cc:dd:ee:ff",
+                        "name": "Entry Reader",
+                        "type": "reader",
+                        "is_online": False,
+                        "firmware_version": "3.2.7",
+                        "mac": "aa:bb:cc:dd:ee:ff",
+                        "ip": "192.168.1.20",
+                    }
+                ],
+                "count": 1,
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_get_projects_proxy_shape_to_public_contract(self):
+        raw = {
+            "unique_id": "Device-ABC",
+            "alias": "Side Reader",
+            "device_type": "UA-G3",
+            "is_online": True,
+            "firmware": "3.17.11",
+            "mac": "AA:BB:CC:DD:EE:FF",
+            "ip": "192.168.1.21",
+            "_door_name": "Side Door",
+        }
+        with patch("unifi_access_mcp.tools.devices.device_manager") as mock_mgr:
+            mock_mgr.get_device = AsyncMock(return_value=raw)
+            from unifi_access_mcp.tools.devices import access_get_device
+
+            result = await access_get_device("Device-ABC")
+
+        assert result["success"] is True
+        assert result["data"]["id"] == "Device-ABC"
+        assert result["data"]["mac"] == "AA:BB:CC:DD:EE:FF"
+        assert result["data"]["ip"] == "192.168.1.21"
+        assert result["data"]["location"]["name"] == "Side Door"
 
 
 def _configs_info() -> dict:

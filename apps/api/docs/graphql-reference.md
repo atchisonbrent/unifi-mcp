@@ -16,6 +16,8 @@ type AccessDevice {
   type: String
   isOnline: Boolean
   firmwareVersion: String
+  mac: String
+  ip: String
   location: AccessLocation
 }
 

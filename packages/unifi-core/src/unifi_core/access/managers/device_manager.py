@@ -23,6 +23,7 @@ from unifi_core.access.models.device_configs import (
     validate_config_updates,
 )
 from unifi_core.exceptions import UniFiConnectionError, UniFiNotFoundError
+from unifi_core.mac import looks_like_mac, mac_equal
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ _COMPACT_DEVICE_KEYS = frozenset(
     }
 )
 
-_API_DEVICE_LIST_KEYS = ("id", "name", "type", "connected", "firmware_version")
+_API_DEVICE_LIST_KEYS = ("id", "name", "type", "connected", "firmware_version", "mac", "ip")
 
 
 class DeviceManager:
@@ -64,13 +65,22 @@ class DeviceManager:
     @staticmethod
     def _api_device_to_dict(device: Any) -> Dict[str, Any]:
         """Translate a py-unifi-access Device into the manager response dialect."""
+        # `Device` carries the MAC in `id` and has no `mac` attribute of its
+        # own, so reading `.mac` reported every API-path device as having no
+        # address. No `unique_id` is emitted: that key means the controller's
+        # own topology identifier, and publishing a MAC under it led the reboot
+        # path to post an address into a unique_id-shaped URL.
+        # Reported verbatim when the controller supplies one; `id` is the
+        # fallback rather than a rewrite, so a device that does carry its own
+        # `mac` keeps exactly the value the controller sent.
+        mac = getattr(device, "mac", None) or device.id
         return {
             "id": device.id,
             "name": getattr(device, "name", None),
             "type": getattr(device, "type", None),
             "connected": getattr(device, "is_online", None),
             "firmware_version": getattr(device, "firmware_version", None),
-            "mac": getattr(device, "mac", None),
+            "mac": mac,
             "ip": getattr(device, "ip", None),
         }
 
@@ -167,7 +177,16 @@ class DeviceManager:
         try:
             if self._cm.has_api_client:
                 devices = await self._cm.api_client.get_devices()
-                device = next((device for device in devices if device.id == device_id), None)
+                device = next(
+                    (
+                        device
+                        for device in devices
+                        if device.id == device_id
+                        or mac_equal(device.id, device_id)
+                        or mac_equal(getattr(device, "mac", None), device_id)
+                    ),
+                    None,
+                )
                 if device is None:
                     raise UniFiNotFoundError("device", device_id)
                 return self._api_device_to_dict(device)
@@ -176,7 +195,7 @@ class DeviceManager:
                 topology = self._cm.extract_data(data)
                 devices = self._extract_devices_from_topology(topology)
                 for dev in devices:
-                    if dev.get("unique_id") == device_id or dev.get("mac") == device_id:
+                    if dev.get("unique_id") == device_id or mac_equal(dev.get("mac"), device_id):
                         return dev
                 raise UniFiNotFoundError("device", device_id)
             else:
@@ -191,14 +210,46 @@ class DeviceManager:
     # Mutation methods (preview/confirm pattern)
     # ------------------------------------------------------------------
 
+    async def _resolve_topology_unique_id(self, device_id: str) -> str | None:
+        """Return the controller's own identifier for a device, via the proxy.
+
+        The reboot endpoint is indexed by the topology's ``unique_id``, but the
+        public API client knows devices only by MAC. Under dual auth the API
+        arm answers the lookup, so without this the MAC is what reaches the
+        reboot URL.
+
+        Resolution is opportunistic, never a gate: the topology walk only sees
+        devices linked under a door, so failing hard here would make an
+        unlinked or newly adopted device un-rebootable where posting the id as
+        given would have worked.
+        """
+        if not self._cm.has_proxy:
+            return None
+        try:
+            data = await self._cm.proxy_request("GET", "devices/topology4")
+            topology = self._cm.extract_data(data)
+            for dev in self._extract_devices_from_topology(topology):
+                if dev.get("unique_id") == device_id or mac_equal(dev.get("mac"), device_id):
+                    return dev.get("unique_id")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not resolve %s through the topology: %s", device_id, exc)
+        return None
+
     async def reboot_device(self, device_id: str) -> Dict[str, Any]:
         """Preview a device reboot. Returns preview data for confirmation."""
         if not device_id:
             raise ValueError("device_id is required")
 
         current = await self.get_device(device_id)
+        # Resolve to the controller's own identifier. The lookup accepts a MAC
+        # in any case, but apply_reboot_device interpolates this value straight
+        # into the request path, and the controller indexes by unique_id. The
+        # API arm has no unique_id to give, so the topology is consulted.
+        resolved_id = current.get("unique_id") or await self._resolve_topology_unique_id(
+            current.get("mac") or device_id
+        )
         return {
-            "device_id": device_id,
+            "device_id": resolved_id or device_id,
             "device_name": current.get("name"),
             "device_type": current.get("type"),
             "current_state": {
@@ -218,9 +269,23 @@ class DeviceManager:
         """
         try:
             if self._cm.has_proxy:
-                await self._cm.proxy_request("POST", f"devices/{device_id}/reboot")
+                # The path needs the controller's unique_id, but device_id may
+                # be a MAC. Resolve ONLY when it looks like one - Access
+                # unique_ids carry no separators - so a unique_id caller keeps
+                # the single-request behaviour it has always had.
+                #
+                # And resolve OPPORTUNISTICALLY, never as a gate: the topology
+                # walk only sees devices linked under a door, so failing hard
+                # would make an unlinked or newly adopted device un-rebootable
+                # where the bare POST would have worked.
+                resolved_id = device_id
+                if looks_like_mac(device_id):
+                    resolved_id = await self._resolve_topology_unique_id(device_id) or device_id
+                    if resolved_id == device_id:
+                        logger.debug("Reboot target %s not in topology; posting the id as given", device_id)
+                await self._cm.proxy_request("POST", f"devices/{resolved_id}/reboot")
                 return {
-                    "device_id": device_id,
+                    "device_id": resolved_id,
                     "action": "reboot",
                     "result": "success",
                 }
@@ -259,7 +324,7 @@ class DeviceManager:
             topology = self._cm.extract_data(data)
             devices = self._extract_devices_from_topology(topology)
             for dev in devices:
-                if dev.get("unique_id") == device_id or dev.get("mac") == device_id:
+                if dev.get("unique_id") == device_id or mac_equal(dev.get("mac"), device_id):
                     resolved_id = dev.get("unique_id") or device_id
                     return {
                         "device_id": resolved_id,

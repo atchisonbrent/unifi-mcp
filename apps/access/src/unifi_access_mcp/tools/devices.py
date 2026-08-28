@@ -20,6 +20,11 @@ from unifi_core.exceptions import UniFiNotFoundError
 
 logger = logging.getLogger(__name__)
 
+DEVICE_ID_DESCRIPTION = (
+    "Device identifier returned as 'id' by access_list_devices. This is a MAC address on the Integration API "
+    "path and an Access topology unique ID on the local proxy path."
+)
+
 
 @server.tool(
     name="access_list_devices",
@@ -66,7 +71,7 @@ async def access_list_devices(
     auth="either",
 )
 async def access_get_device(
-    device_id: Annotated[str, Field(description="Device UUID (from access_list_devices)")],
+    device_id: Annotated[str, Field(description=DEVICE_ID_DESCRIPTION)],
 ) -> Dict[str, Any]:
     """Get detailed device information by ID."""
     logger.info("access_get_device tool called for %s", device_id)
@@ -94,7 +99,7 @@ async def access_get_device(
     auth="local_only",
 )
 async def access_reboot_device(
-    device_id: Annotated[str, Field(description="Device UUID (from access_list_devices)")],
+    device_id: Annotated[str, Field(description=DEVICE_ID_DESCRIPTION)],
     confirm: Annotated[
         bool,
         Field(description="When true, executes the reboot. When false (default), returns a preview."),
@@ -117,7 +122,9 @@ async def access_reboot_device(
         return preview_response(
             action="reboot",
             resource_type="access_device",
-            resource_id=device_id,
+            # The resolved identifier, not the caller's string: device_id may
+            # be a MAC, and the preview should name what will actually be acted on.
+            resource_id=preview_data.get("device_id", device_id),
             current_state=preview_data["current_state"],
             proposed_changes=preview_data["proposed_changes"],
             resource_name=preview_data.get("device_name"),
@@ -145,7 +152,7 @@ async def access_reboot_device(
     auth="local_only",
 )
 async def access_get_device_configs(
-    device_id: Annotated[str, Field(description="Device UUID (from access_list_devices)")],
+    device_id: Annotated[str, Field(description=DEVICE_ID_DESCRIPTION)],
 ) -> Dict[str, Any]:
     """Return a device's config/settings entries, redacting sensitive values."""
     logger.info("access_get_device_configs tool called for %s", device_id)
@@ -185,7 +192,7 @@ async def access_get_device_configs(
     auth="local_only",
 )
 async def access_update_device_config(
-    device_id: Annotated[str, Field(description="Device UUID (from access_list_devices)")],
+    device_id: Annotated[str, Field(description=DEVICE_ID_DESCRIPTION)],
     updates: Annotated[
         Dict[str, str],
         Field(description="Map of config key → new value. Keys must already exist on the device."),

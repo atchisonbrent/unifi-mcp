@@ -99,8 +99,11 @@ async def get_traffic_flows(
         "region count breakdowns plus Top-Talker rankings for a preset period: top clients, top "
         "destinations, top applications (by bytes), top blocked clients, and top blocking policies. "
         "Risk bands are low/medium/high (the UI labels these Low/Suspicious/Concerning). Application "
-        "entries carry DPI application_id/category_id and bytes; application_name/category_name are "
-        "null (DPI-catalog name resolution is not yet wired). Read-only."
+        "entries include best-effort DPI application/category names resolved from the controller catalogue; "
+        "names remain null when the catalogue is unavailable or has no matching entry. The returned "
+        "application_id is the low V2 traffic-flow application ID, not the Integration API compound ID. "
+        "These IDs are scoped to the V2 traffic-flow tool family — do not pass them to Integration API DPI "
+        "tools. Read-only."
     ),
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
 )

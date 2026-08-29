@@ -104,7 +104,13 @@ _STATS_MANAGER_OUTPUT = {
     "top_blocked_clients": [{"count": 7, "client_mac": "aa:bb:cc:00:00:02", "client_name": "Blocked-Host"}],
     "top_destinations": [{"count": 200, "destination": "example.test", "most_frequent_region": "US"}],
     "top_applications": [
-        {"application_id": 470, "category_id": 4, "bytes": 999, "application_name": None, "category_name": None}
+        {
+            "application_id": 470,
+            "category_id": 4,
+            "bytes": 999,
+            "application_name": "Netflix",
+            "category_name": "Media streaming services",
+        }
     ],
     "top_blocked_policies": [
         {"count": 7, "policy_id": "p1", "policy_name": "Region Blocking", "policy_type": "PROTECTION"}
@@ -124,13 +130,35 @@ def test_statistics_from_manager_output_maps_fields() -> None:
     assert d["top_blocked_policies"][0]["policy_name"] == "Region Blocking"
 
 
-def test_statistics_top_application_name_nullable() -> None:
+def test_statistics_projects_resolved_top_application_names() -> None:
     from unifi_api.graphql.types.network.traffic_flow import TrafficFlowStatistics
 
     app = TrafficFlowStatistics.from_manager_output(_STATS_MANAGER_OUTPUT).to_dict()["top_applications"][0]
     assert app["application_id"] == 470
     assert app["category_id"] == 4
     assert app["bytes"] == 999
+    assert app["application_name"] == "Netflix"
+    assert app["category_name"] == "Media streaming services"
+
+
+def test_statistics_preserves_unresolved_top_application_names() -> None:
+    from unifi_api.graphql.types.network.traffic_flow import TrafficFlowStatistics
+
+    raw = {
+        **_STATS_MANAGER_OUTPUT,
+        "top_applications": [
+            {
+                "application_id": 470,
+                "category_id": 4,
+                "bytes": 999,
+                "application_name": None,
+                "category_name": None,
+            }
+        ],
+    }
+
+    app = TrafficFlowStatistics.from_manager_output(raw).to_dict()["top_applications"][0]
+
     assert app["application_name"] is None
     assert app["category_name"] is None
 

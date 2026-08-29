@@ -168,8 +168,18 @@ class TrafficFlowTopDestination:
 
 @strawberry.type(description="An application in a traffic-flow Top-Talkers ranking (by bytes).")
 class TrafficFlowTopApplication:
-    application_id: int | None
-    category_id: int | None
+    application_id: int | None = strawberry.field(
+        description=(
+            "Low V2 traffic-flow application ID. Scoped to the V2 traffic-flow tool family; "
+            "do not pass it to Integration API DPI tools."
+        )
+    )
+    category_id: int | None = strawberry.field(
+        description=(
+            "V2 traffic-flow category ID used for one-way name annotation. Scoped to the V2 "
+            "traffic-flow tool family; do not pass it to Integration API DPI tools."
+        )
+    )
     bytes: int | None
     application_name: str | None
     category_name: str | None

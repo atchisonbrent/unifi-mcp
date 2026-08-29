@@ -205,6 +205,14 @@ for name in registry.all_tools():
         )
 if failures:
     raise SystemExit("\\n".join(failures))
+connection = type("Connection", (), {"unifi_auth": object()})()
+traffic_flow_manager = _PRODUCT_BUILDERS["network"]()["traffic_flow_manager"](connection)
+if traffic_flow_manager._connection is not connection:
+    raise SystemExit("traffic_flow_manager did not retain the API connection manager")
+if traffic_flow_manager._dpi_manager._connection is not connection:
+    raise SystemExit("traffic_flow_manager DPI provider did not retain the API connection manager")
+if traffic_flow_manager._dpi_manager._auth is not connection.unifi_auth:
+    raise SystemExit("traffic_flow_manager DPI provider did not retain the API connection auth")
 print(f"validated {len(registry)} catalog bindings against installed Core floor")
 """
 
@@ -246,6 +254,8 @@ for module_name in sorted(set(manifest["module_map"].values())):
             failures.append(f"{module_name}: missing {manager_name}.{call.attr}")
 if not checked:
     failures.append("no direct Core manager call sites were discovered")
+if runtime.traffic_flow_manager._dpi_manager is not runtime.dpi_manager:
+    failures.append("traffic_flow_manager is not wired to the runtime DPI catalogue manager")
 if failures:
     raise SystemExit("\\n".join(failures))
 print(f"validated {len(checked)} direct Core manager call sites against installed Core floor")

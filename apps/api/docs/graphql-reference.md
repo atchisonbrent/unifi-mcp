@@ -2016,7 +2016,14 @@ type TrafficFlowStatistics {
 
 """An application in a traffic-flow Top-Talkers ranking (by bytes)."""
 type TrafficFlowTopApplication {
+  """
+  Low V2 traffic-flow application ID. Scoped to the V2 traffic-flow tool family; do not pass it to Integration API DPI tools.
+  """
   applicationId: Int
+
+  """
+  V2 traffic-flow category ID used for one-way name annotation. Scoped to the V2 traffic-flow tool family; do not pass it to Integration API DPI tools.
+  """
   categoryId: Int
   bytes: Int
   applicationName: String

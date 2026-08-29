@@ -155,8 +155,8 @@ async def test_traffic_flow_statistics(tmp_path, monkeypatch):
                         "application_id": 470,
                         "category_id": 4,
                         "bytes": 999,
-                        "application_name": None,
-                        "category_name": None,
+                        "application_name": "Netflix",
+                        "category_name": "Media streaming services",
                     }
                 ],
                 "top_blocked_policies": [
@@ -174,7 +174,7 @@ async def test_traffic_flow_statistics(tmp_path, monkeypatch):
             topClients {{ count clientName clientMac }}
             topBlockedClients {{ count clientName }}
             topDestinations {{ destination mostFrequentRegion }}
-            topApplications {{ applicationId categoryId bytes applicationName }}
+            topApplications {{ applicationId categoryId bytes applicationName categoryName }}
             topBlockedPolicies {{ policyName policyType }}
         }} }}
     }}""",
@@ -186,8 +186,45 @@ async def test_traffic_flow_statistics(tmp_path, monkeypatch):
     assert stats["topBlockedClients"] == []
     assert stats["topDestinations"][0]["mostFrequentRegion"] == "US"
     assert stats["topApplications"][0]["applicationId"] == 470
-    assert stats["topApplications"][0]["applicationName"] is None
+    assert stats["topApplications"][0]["applicationName"] == "Netflix"
+    assert stats["topApplications"][0]["categoryName"] == "Media streaming services"
     assert stats["topBlockedPolicies"][0]["policyName"] == "Region Blocking"
+
+
+@pytest.mark.asyncio
+async def test_traffic_flow_statistics_preserves_unresolved_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNIFI_API_DB_KEY", "k")
+    app, key, cid = await bootstrap(tmp_path, product="network")
+    stub_managers(
+        monkeypatch,
+        {
+            ("network", "traffic_flow_manager", "get_traffic_flow_statistics"): {
+                "top_applications": [
+                    {
+                        "application_id": 470,
+                        "category_id": 4,
+                        "bytes": 999,
+                        "application_name": None,
+                        "category_name": None,
+                    }
+                ]
+            },
+        },
+    )
+    body = await graphql_query(
+        app,
+        key,
+        f'''{{
+        network {{ trafficFlowStatistics(controller: "{cid}") {{
+            topApplications {{ applicationId categoryId applicationName categoryName }}
+        }} }}
+    }}''',
+    )
+
+    assert body.get("errors") is None, body
+    application = body["data"]["network"]["trafficFlowStatistics"]["topApplications"][0]
+    assert application["applicationName"] is None
+    assert application["categoryName"] is None
 
 
 @pytest.mark.asyncio

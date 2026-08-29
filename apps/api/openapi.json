@@ -7746,6 +7746,7 @@
                 "type": "null"
               }
             ],
+            "description": "Low V2 traffic-flow application ID. Scoped to the V2 traffic-flow tool family; do not pass it to Integration API DPI tools.",
             "title": "Application Id"
           },
           "application_name": {
@@ -7779,6 +7780,7 @@
                 "type": "null"
               }
             ],
+            "description": "V2 traffic-flow category ID used for one-way name annotation. Scoped to the V2 traffic-flow tool family; do not pass it to Integration API DPI tools.",
             "title": "Category Id"
           },
           "category_name": {

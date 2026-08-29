@@ -104,6 +104,18 @@ def test_firewall_manager_builder_receives_connection_auth() -> None:
     assert manager._auth is auth
 
 
+def test_traffic_flow_manager_builder_receives_dpi_catalog_with_connection_auth() -> None:
+    auth = object()
+    cm = _FakeCM()
+    cm.unifi_auth = auth
+
+    manager = _build_network_managers()["traffic_flow_manager"](cm)
+
+    assert manager._connection is cm
+    assert manager._dpi_manager._connection is cm
+    assert manager._dpi_manager._auth is auth
+
+
 @pytest.mark.asyncio
 async def test_invalidate_drops_cached_instance(tmp_path: Path, monkeypatch) -> None:
     _patch_network_cm(monkeypatch)

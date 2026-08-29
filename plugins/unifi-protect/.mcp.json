@@ -6,7 +6,7 @@
       "args": [
         "--python-preference",
         "system",
-        "unifi-protect-mcp==0.7.8"
+        "unifi-protect-mcp==0.7.9"
       ],
       "env": {
         "UNIFI_HOST": "${UNIFI_PROTECT_HOST:-}",

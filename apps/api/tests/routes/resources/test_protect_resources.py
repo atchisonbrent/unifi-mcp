@@ -10,6 +10,7 @@ from unifi_api.config import ApiConfig, DbConfig, HttpConfig, LoggingConfig
 from unifi_api.db.crypto import ColumnCipher, derive_key
 from unifi_api.db.models import ApiKey, Base, Controller
 from unifi_api.server import create_app
+from unifi_core.exceptions import UniFiNotFoundError
 
 
 def _cfg(tmp_path):
@@ -138,14 +139,17 @@ async def test_get_camera_happy_and_404(tmp_path, monkeypatch) -> None:
         "type": "camera",
         "state": "CONNECTED",
         "is_recording": True,
+        "firmware_version": "5.4.132",
         "ip_address": "10.0.0.5",
+        "smart_detect_types": ["person", "package"],
+        "is_ptz": False,
         "channels": [],
     }
 
     async def fake_get(self, camera_id):
         if camera_id == "cam-1":
             return target
-        raise ValueError(f"Camera not found: {camera_id}")
+        raise UniFiNotFoundError("camera", camera_id)
 
     from unifi_core.protect.managers.camera_manager import CameraManager
 
@@ -164,6 +168,10 @@ async def test_get_camera_happy_and_404(tmp_path, monkeypatch) -> None:
     assert ok.status_code == 200, ok.text
     body = ok.json()
     assert body["data"]["id"] == "cam-1"
+    assert body["data"]["firmware_version"] == "5.4.132"
+    assert body["data"]["host"] == "10.0.0.5"
+    assert body["data"]["smart_detect_types"] == ["person", "package"]
+    assert body["data"]["is_ptz"] is False
     assert body["render_hint"]["kind"] == "detail"
     assert miss.status_code == 404
 

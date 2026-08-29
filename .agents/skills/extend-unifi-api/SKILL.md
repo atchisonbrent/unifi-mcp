@@ -43,7 +43,6 @@ Reference `packages/unifi-core/src/unifi_core/network/managers/dns_manager.py` a
 from functools import lru_cache
 from unifi_core.network.managers.dns_manager import DnsManager
 
-
 @lru_cache
 def get_dns_manager() -> DnsManager:
     return DnsManager(get_connection_manager())
@@ -64,8 +63,7 @@ async def get_dns_record(self, record_id: str) -> dict:
 **2B: V2 single-resource responses may be wrapped in lists.** Always check `isinstance(response, list)` BEFORE `isinstance(response, dict)`:
 ```python
 response = await self._connection.request(api_request)
-if isinstance(response, list):
-    return response[0] if response else None
+if isinstance(response, list): return response[0] if response else None
 return response
 ```
 
@@ -90,7 +88,6 @@ return response
 from pydantic import BaseModel
 from typing import Optional, FrozenSet
 
-
 class DnsRecord(BaseModel):
     id: Optional[str] = None
     record_type: Optional[str] = None
@@ -100,17 +97,16 @@ class DnsRecord(BaseModel):
     enabled: Optional[bool] = None
     model_config = {"populate_by_name": True}
 
-
 MUTABLE_FIELDS = frozenset({"record_type", "key", "value", "ttl", "enabled"})
 READ_ONLY_FIELDS = frozenset({"id"})
 
-
 def to_controller_update(fields: dict) -> dict:
     invalid = set(fields) - MUTABLE_FIELDS
-    if invalid:
-        raise ValueError(f"Read-only fields: {invalid}")
+    if invalid: raise ValueError(f"Read-only fields: {invalid}")
     return fields
 ```
+
+**Do not conflate same-shaped enums across different fields:** review found the WAN IPv6 validator conflated `wan_type_v6` (connection type; values like `dhcpv6`) with `ipv6_wan_delegation_type` (delegation mode; values like `pd`/`single_network`/`static`) because both are string enums with overlapping vocabularies. When two fields use similarly-shaped enums, validate each against its OWN allowed-value set — never share a validator or constant list between fields just because the value shapes look alike.
 
 ### Step 4 — Create Tool Module
 
@@ -122,27 +118,16 @@ from mcp.types import Tool, ToolAnnotations
 from ..runtime import get_dns_manager
 from unifi_core.network.models.dns_record import DnsRecord, MUTABLE_FIELDS
 
-
 def get_tools() -> list[Tool]:
     _mutable = {k: v for k, v in DnsRecord.model_json_schema()["properties"].items() if k in MUTABLE_FIELDS}
     return [
-        Tool(
-            name="network_dns_record_list",
-            description="List DNS records.",
-            inputSchema={"type": "object", "properties": {}},
-            annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-        ),
-        Tool(
-            name="network_dns_record_update",
-            description="Update DNS record.",
-            inputSchema={
-                "type": "object",
-                "properties": {"record_id": {"type": "string"}, **_mutable},
-                "required": ["record_id"],
-                "additionalProperties": False,
-            },
-            annotations=ToolAnnotations(destructiveHint=False, idempotentHint=True),
-        ),
+        Tool(name="network_dns_record_list", description="List DNS records.",
+             inputSchema={"type": "object", "properties": {}},
+             annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True)),
+        Tool(name="network_dns_record_update", description="Update DNS record.",
+             inputSchema={"type": "object", "properties": {"record_id": {"type": "string"}, **_mutable},
+                          "required": ["record_id"], "additionalProperties": False},
+             annotations=ToolAnnotations(destructiveHint=False, idempotentHint=True)),
     ]
 ```
 
@@ -155,7 +140,6 @@ All mutating tools require preview/confirm flow.
 ```python
 from pydantic import BaseModel, Field
 from typing import Optional
-
 
 class AlarmArmInput(BaseModel):
     alarm_id: str = Field(..., description="Alarm ID to arm")
@@ -174,7 +158,6 @@ class AlarmArmInput(BaseModel):
 **Action translators** (arm, disarm, toggle — no nested `rule_data`):
 ```python
 from unifi_core.protect.models._actions import AlarmArmInput
-
 DISPATCH_ARG_TRANSLATORS = {
     "protect_alarm_arm": lambda args, ctx: AlarmArmInput(**args).model_dump(),
 }
@@ -225,7 +208,6 @@ import strawberry
 from typing import Optional
 from unifi_api.types._base import UniFiType
 
-
 @strawberry.type
 class Client(UniFiType):
     kind: str = "LIST"  # required
@@ -267,9 +249,8 @@ from unifi_api.services.pagination import Cursor, paginate
 
 cursor = Cursor.decode(cursor_param) if cursor_param else None
 items = await manager.get_clients()
-page, next_cursor = paginate(
-    items, limit=50, cursor=cursor, key_fn=lambda i: (i.raw.get("last_seen", 0), i.raw.get("_id", ""))
-)
+page, next_cursor = paginate(items, limit=50, cursor=cursor,
+                            key_fn=lambda i: (i.raw.get("last_seen", 0), i.raw.get("_id", "")))
 return {"items": [...], "next_cursor": next_cursor.encode() if next_cursor else None}
 ```
 
@@ -299,7 +280,6 @@ Uses `asyncio.Lock` per controller to prevent concurrent cache-miss races. Call 
 Use `copy.deepcopy()` to preserve sibling fields during merge:
 ```python
 import copy
-
 current = await self.get_firewall_rule(rule_id)
 merged = copy.deepcopy(current.raw)
 merged.update(updates)
@@ -391,12 +371,9 @@ All `update_*` tools use the fetch-merge-put pattern. Skipping the fetch step ca
 async def update_dns_record(self, record_id: str, update_data: dict) -> dict:
     # 1. Fetch current state
     current = await self.get_dns_record(record_id)
-    if not current:
-        raise ValueError(f"Record {record_id} not found")
+    if not current: raise ValueError(f"Record {record_id} not found")
     # 2. Deep-copy before mutating (protects cached response)
-    import copy
-
-    base = copy.deepcopy(current)
+    import copy; base = copy.deepcopy(current)
     # 3. Merge caller's partial dict over the base
     merged = {**base, **update_data}
     # 4. PUT the fully-merged object
@@ -438,9 +415,9 @@ Every update tool must verify non-passed fields are preserved after the update:
 # mock_get returns {"name": "original", "vlan": 10, "notes": "keep me"}
 await manager.update_dns_record("id-1", {"name": "new-name"})
 payload = mock_put.call_args[1]["json"]
-assert payload["vlan"] == 10  # preserved
-assert payload["notes"] == "keep me"  # preserved
-assert payload["name"] == "new-name"  # updated
+assert payload["vlan"] == 10            # preserved
+assert payload["notes"] == "keep me"   # preserved
+assert payload["name"] == "new-name"   # updated
 ```
 
 ### Write-Verification Standard
@@ -530,6 +507,8 @@ Manager methods: `list_{resource}s()`, `get_{resource}(id)`, `create_{resource}(
 **Cross-package combined pytest run hits conftest collision:** Running `uv run pytest packages/ apps/` causes pytest to load conflicting conftest files from different packages and fail. Run per-package instead: `uv run pytest packages/unifi-core` or `uv run pytest apps/network`.
 
 **`uv sync --all-packages` required before isolated worktree api tests:** When running api-layer tests in an isolated worktree (outside the full monorepo workspace), cross-package deps are not resolved. Run `uv sync --all-packages` first or tests will import the wrong version of `unifi-core` and fail with import errors or stale-model assertions.
+
+**Partial-update normalizers must not reuse the create-time normalizer unmodified:** review flagged `packages/unifi-core/src/unifi_core/network/managers/oon_manager.py` reusing the create-time secure-config normalizer for partial updates, which silently injected an unrelated field while the caller only intended to toggle one setting, overwriting unrelated policy. Partial-update paths need their own normalizer that touches only explicitly-provided fields; do not assume the create normalizer is safe to reuse for update payloads.
 
 **Update translators must reject unknown fields — never filter silently:** When a dispatch translator handles a tool that uses a nested `rule_data: dict`, check `set(rule_data) - MUTABLE_FIELDS` and raise `ValueError` on unknown fields. Then run `validate_update_fields(rule_data)` on the full dict before returning. Silent filtering (e.g., `{k: v for k, v in rule_data.items() if k in MUTABLE_FIELDS}`) masks caller errors and hides field-name mismatches. Reference: `_translate_acl_update` in `apps/api/src/unifi_api/services/dispatch_overrides.py`.
 

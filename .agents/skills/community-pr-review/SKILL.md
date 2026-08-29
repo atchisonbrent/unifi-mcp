@@ -427,6 +427,10 @@ There is no goodwill concern — a bot is a tool whose value is the idea, not th
 
 ## Step 1b — Post Feedback With the Right Review Type
 
+**Copilot review threads are not approval gates.** "Open Copilot reviews" shown on a GitHub PR are review threads/comments, not a blocking review state — they do not by themselves prevent merge the way a human REQUEST_CHANGES review does. Do not treat an unresolved Copilot thread as a hard blocker unless its content identifies a real issue; verify against the actual PR review state (`gh pr view --json reviews`), not the presence of Copilot comments.
+
+**PR head can drift between pre-submit refresh and GitHub accepting the review.** Refreshing the PR head immediately before posting a formal review (REQUEST_CHANGES or otherwise) does not guarantee the review lands against that exact commit — a contributor can push a new commit in the narrow window between your refresh and GitHub accepting the review call, silently attaching your review to a stale diff. Re-check the PR head SHA right before submitting, and re-verify after submission that the review's `commit_id` matches what you expect.
+
 When you find merge blockers in Step 1, submit your GitHub review as **`request-changes`**, not
 as `comment`. This prevents accidental merge and signals mandatory work clearly.
 
@@ -755,6 +759,12 @@ Only after all three checks pass should you treat the AI-traced diagnosis as act
 **Gotcha: hardware-specific bug reports still need the UniFi OS version, even when well-investigated.** A well-investigated hardware-specific bug report (device the maintainer lacked access to) omitted the OS version needed to correlate against a firmware-version block. Always request it explicitly.
 
 ---
+
+## Copilot PR-Review Calibration
+
+**Governance note:** Copilot Code Review's own configuration is live and mutable — the source of truth for what Copilot reads (instructions/config files) and who can change it must be tightly scoped and audited, the same way code changes are. Treat Copilot config changes with the same rigor as the quality gate above, not as a lower-stakes doc change.
+
+When automating GitHub Copilot code review on unifi-mcp PRs, calibrate methodology, budget, and scope around one theme: optimize for the real operational outcome (faster, trustworthy community PR/issue triage) rather than maximizing raw review coverage. Treat Copilot review output as an input to the existing quality gate checklist above, not a replacement for it — apply the same hard-blocker/minor-item triage and evidence-first standards to Copilot-sourced findings as to human or dual-subagent findings.
 
 ## Quick Reference — Gate Summary
 

@@ -185,12 +185,14 @@ def test_access_recent_events_shape() -> None:
             "door_id": "door-1",
             "user_id": "user-2",
             "credential_id": None,
+            "message": "Access denied",
             "result": "denied",
         }
     ]
     out = s.serialize_action(sample, tool_name="access_recent_events")
     assert out["success"] is True
     assert out["data"][0]["id"] == "evt-2"
+    assert out["data"][0]["message"] == "Access denied"
     assert out["data"][0]["result"] == "denied"
     assert out["render_hint"]["kind"] == "event_log"
 

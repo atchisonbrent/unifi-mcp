@@ -53,6 +53,7 @@ type AccessEvent {
   doorId: String
   userId: String
   credentialId: String
+  message: String
   result: String
 
   """The door this event references."""

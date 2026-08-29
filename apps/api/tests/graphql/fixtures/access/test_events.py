@@ -322,3 +322,114 @@ async def test_access_activity_summary(tmp_path, monkeypatch):
     assert summary["totalEvents"] == 42
     assert summary["grantedCount"] == 38
     assert summary["deniedCount"] == 4
+
+
+@pytest.mark.asyncio
+async def test_access_events_expose_the_controller_message(tmp_path, monkeypatch):
+    """The system-log rows carry a human-readable summary; the API surfaces
+    must not drop it. `access.door.unlock` renders as "Access Granted (Face)",
+    which is the only field that says what actually happened."""
+    monkeypatch.setenv("UNIFI_API_DB_KEY", "k")
+    app, key, cid = await bootstrap(tmp_path, product="access")
+    stub_managers(
+        monkeypatch,
+        {
+            ("access", "event_manager", "list_events"): [
+                {
+                    "id": "evt1",
+                    "type": "access.door.unlock",
+                    "message": "Access Granted (Face)",
+                    "timestamp": "2026-08-18T12:00:00+00:00",
+                },
+            ],
+        },
+    )
+    body = await graphql_query(
+        app,
+        key,
+        f'''{{
+        access {{ events(controller: "{cid}", limit: 10) {{
+            items {{ id message }}
+        }} }}
+    }}''',
+    )
+    assert body.get("errors") is None, body
+    items = body["data"]["access"]["events"]["items"]
+    assert items[0]["message"] == "Access Granted (Face)"
+
+
+@pytest.mark.asyncio
+async def test_access_events_project_the_real_system_log_shape(tmp_path, monkeypatch):
+    """`access_list_events` returns raw controller rows, not Event models, and
+    the system-log shape uses `event_type` / `published` / nested `metadata`.
+    Reading `type`/`timestamp`/`door_id`/`user_id` off it yielded a row that was
+    nothing but an id and a result — on GraphQL and REST, the exact bug the core
+    model fix addresses."""
+    monkeypatch.setenv("UNIFI_API_DB_KEY", "k")
+    app, key, cid = await bootstrap(tmp_path, product="access")
+    stub_managers(
+        monkeypatch,
+        {
+            ("access", "event_manager", "list_events"): [
+                {
+                    "id": "",
+                    "log_key": "access.door.unlock",
+                    "event_type": "access.door.unlock",
+                    "message": "Access Granted (Face)",
+                    "published": 1787054400000,
+                    "result": "ACCESS",
+                    "metadata": {
+                        "actor": {"id": "person-uuid", "type": "user", "display_name": "Test Person"},
+                        "door": {"id": "door-uuid", "type": "door", "display_name": "Test Door"},
+                    },
+                },
+            ],
+        },
+    )
+    body = await graphql_query(
+        app,
+        key,
+        f'''{{
+        access {{ events(controller: "{cid}", limit: 10) {{
+            items {{ type timestamp doorId userId message result }}
+        }} }}
+    }}''',
+    )
+    assert body.get("errors") is None, body
+    row = body["data"]["access"]["events"]["items"][0]
+    assert row["type"] == "access.door.unlock", row
+    assert row["timestamp"] is not None, "every system-log row was timeless"
+    assert row["doorId"] == "door-uuid", row
+    assert row["userId"] == "person-uuid", row
+    assert row["message"] == "Access Granted (Face)"
+    assert row["result"] == "ACCESS"
+
+
+# --- projection unwrapping ----------------------------------------------------
+
+
+def test_projection_unwraps_a_raw_wrapped_row() -> None:
+    """Manager output may be a wrapper exposing `.raw`. This module's `_get`
+    unwraps it; the core normaliser's does not, so handing the wrapper straight
+    over yielded an all-None row - silently, with no error."""
+    from unifi_api.graphql.types.access.events import Event
+
+    class Wrapped:
+        def __init__(self, raw):
+            self.raw = raw
+
+    row = Wrapped({"event_type": "access.door.unlock", "message": "Access Granted (Face)", "published": 1787054400000})
+    projected = Event.from_manager_output(row)
+    assert projected.type == "access.door.unlock"
+    assert projected.message == "Access Granted (Face)"
+    assert projected.timestamp is not None
+
+
+def test_projection_reads_message_from_the_normalized_model() -> None:
+    """The declared Core floor owns the canonical event projection, including
+    the human-readable message exposed by GraphQL and REST."""
+    from unifi_api.graphql.types.access.events import Event
+
+    assert Event.from_manager_output({"id": "e1", "message": "Access Granted (Face)"}).message == (
+        "Access Granted (Face)"
+    )

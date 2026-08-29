@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -45,6 +46,11 @@ class Event(BaseModel):
     )
     credential_id: Optional[str] = Field(
         default=None, description="Credential UUID used in the event", json_schema_extra={"mutable": False}
+    )
+    message: Optional[str] = Field(
+        default=None,
+        description="Human-readable summary of the event, as the controller renders it",
+        json_schema_extra={"mutable": False},
     )
     result: Optional[str] = Field(
         default=None, description="Event result (granted, denied, etc.)", json_schema_extra={"mutable": False}
@@ -143,15 +149,67 @@ def with_event_identity(raw: dict[str, Any]) -> dict[str, Any]:
     return {**raw, "id": identity}
 
 
+def _epoch_millis_to_iso(value: Any) -> Optional[str]:
+    """Render an epoch-millisecond integer as a UTC ISO 8601 string."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _metadata_entry_id(raw: Any, *keys: str, expected_type: Optional[str] = None) -> Optional[str]:
+    """Pull an id out of the system log's ``metadata`` sub-objects.
+
+    Each entry looks like ``{"id": ..., "type": ..., "display_name": ...}``.
+    The first key resolving to an entry with an id wins.
+
+    ``expected_type`` guards against mis-attribution, which the entries invite:
+    ``actor`` is whatever caused the event, and for an ``access.dps.status.update``
+    record that is the door hub rather than a person. Reading its id ungated
+    reports a device as the user who opened the door. The same applies to
+    readers, which carry a device id that is not the id of any door.
+    """
+    metadata = _get(raw, "metadata")
+    if not isinstance(metadata, dict):
+        return None
+    for key in keys:
+        entry = metadata.get(key)
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        if expected_type is not None and entry.get("type") != expected_type:
+            continue
+        return str(entry["id"])
+    return None
+
+
 def event_from_controller(raw: Any) -> Event:
-    """Build an Event from a manager dict or object."""
+    """Build an Event from a manager dict or object.
+
+    Handles both event shapes this project sees. The websocket/legacy records
+    carry ``type``/``timestamp``/``door_id``/``user_id`` directly. The
+    ``insights/system_log/search`` records - what ``list_events`` actually
+    returns - use ``event_type``, ``published`` in epoch milliseconds, and
+    nest the actor and door inside ``metadata``. Reading only the first set
+    left every system-log row serializing to nothing but an id and a result.
+
+    ``credential_id`` is deliberately read only from a top-level field. The
+    live system-log rows carry credential context under ``authentication``
+    and ``nfc_id`` rather than ``credential``, and which of those is the
+    canonical credential identity is not yet established, so this serializer
+    makes no claim rather than a plausible-looking wrong one.
+    """
     return Event(
         id=event_identity(raw),
-        type=_get(raw, "type"),
-        timestamp=_stringify_dt(_get(raw, "timestamp") or _get(raw, "time")),
-        door_id=_get(raw, "door_id"),
-        user_id=_get(raw, "user_id"),
+        type=_get(raw, "type") or _get(raw, "event_type") or _get(raw, "log_key"),
+        timestamp=(
+            _stringify_dt(_get(raw, "timestamp") or _get(raw, "time")) or _epoch_millis_to_iso(_get(raw, "published"))
+        ),
+        door_id=_get(raw, "door_id") or _metadata_entry_id(raw, "door", expected_type="door"),
+        user_id=_get(raw, "user_id") or _metadata_entry_id(raw, "actor", "user", expected_type="user"),
         credential_id=_get(raw, "credential_id"),
+        message=_get(raw, "message"),
         result=_get(raw, "result"),
     )
 

@@ -23,10 +23,12 @@ async def test_main_starts_mcp_transport_without_authenticating_controller(monke
     import unifi_network_mcp.runtime as runtime
 
     initialize = AsyncMock(return_value=True)
+    cleanup = AsyncMock()
     register_tools = AsyncMock()
     run_transports = AsyncMock(side_effect=TransportStarted)
 
     monkeypatch.setattr(runtime.connection_manager, "initialize", initialize)
+    monkeypatch.setattr(runtime.connection_manager, "cleanup", cleanup)
     monkeypatch.setattr(shared_bootstrap, "assert_credentials_configured", lambda *args, **kwargs: None)
     monkeypatch.setattr(server_lifecycle, "install_asyncio_exception_handler", lambda _logger: None)
     monkeypatch.setattr(server_lifecycle, "apply_log_level", lambda *_args, **_kwargs: None)
@@ -40,6 +42,7 @@ async def test_main_starts_mcp_transport_without_authenticating_controller(monke
         await main.main_async()
 
     initialize.assert_not_awaited()
+    cleanup.assert_awaited_once()
     register_tools.assert_awaited_once()
     run_transports.assert_awaited_once()
 

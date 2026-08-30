@@ -18,6 +18,7 @@ from unifi_network_mcp.jobs import get_job_status, start_async_tool
 # Shared singletons
 from unifi_network_mcp.runtime import (
     config,
+    connection_manager,
     server,
 )
 from unifi_network_mcp.tool_index import register_tool, tool_index_handler
@@ -73,14 +74,17 @@ async def main_async():
 
     # ---- Start transports ----
     http_enabled, http_transport, host, port = resolve_http_config(config.server, default_port=3000, logger=logger)
-    await run_transports(
-        server=server,
-        http_enabled=http_enabled,
-        host=host,
-        port=port,
-        http_transport=http_transport,
-        logger=logger,
-    )
+    try:
+        await run_transports(
+            server=server,
+            http_enabled=http_enabled,
+            host=host,
+            port=port,
+            http_transport=http_transport,
+            logger=logger,
+        )
+    finally:
+        await connection_manager.cleanup()
 
 
 def main():

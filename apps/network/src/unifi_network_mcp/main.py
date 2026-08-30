@@ -3,7 +3,7 @@
 
 Responsibilities:
 • configure permissions wrappers
-• initialise UniFi connection
+• register tools without contacting the UniFi controller
 • start FastMCP (stdio)
 """
 
@@ -18,7 +18,6 @@ from unifi_network_mcp.jobs import get_job_status, start_async_tool
 # Shared singletons
 from unifi_network_mcp.runtime import (
     config,
-    connection_manager,
     server,
 )
 from unifi_network_mcp.tool_index import register_tool, tool_index_handler
@@ -55,13 +54,6 @@ async def main_async():
     apply_log_level(config, "unifi-network-mcp")
     check_deprecated_env_vars("network", logger)
     assert_credentials_configured(config, plugin_name="unifi-network", env_prefix="NETWORK", logger=logger)
-
-    # Initialize the global Unifi connection
-    logger.info("Initializing global Unifi connection from main_async...")
-    if not await connection_manager.initialize():
-        logger.error("Failed to connect to Unifi Controller from main_async. Tool functionality may be impaired.")
-    else:
-        logger.info("Global Unifi connection initialized successfully from main_async.")
 
     # ---- Register tools ----
     await register_tools_for_mode(

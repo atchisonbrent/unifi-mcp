@@ -263,13 +263,17 @@ class TestStatsManagerEnhanced:
         """Test get_ips_events with custom limit."""
         mock_connection.request.return_value = []
 
-        await stats_manager.get_ips_events(limit=10)
+        report = await stats_manager.get_ips_event_report(limit=10)
 
         # An empty legacy answer now triggers the v2 fallback, so the legacy
         # request is the first call rather than the last one.
         api_request = mock_connection.request.call_args_list[0][0][0]
         assert api_request.path == "/stat/ips/event"
         assert api_request.data["_limit"] == 10
+        # The system log answered [] with no total: not a confirmed quiet window.
+        assert report["system_log_cross_check"] == "failed"
+        assert "no events and no exact total" in report["system_log_cross_check_error"]
+        mock_connection._update_cache.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_ips_events_empty_legacy_falls_back_to_v2(self, stats_manager, mock_connection):
@@ -287,7 +291,10 @@ class TestStatsManagerEnhanced:
         assert result == v2_events
         assert mock_connection.request.call_count == 2
         assert mock_connection.request.call_args_list[0][0][0].path == "/stat/ips/event"
-        assert mock_connection.request.call_args_list[1][0][0].path == "/system-log/critical"
+        fallback = mock_connection.request.call_args_list[1][0][0]
+        assert fallback.path == "/system-log/all"
+        assert fallback.data["categories"] == ["SECURITY"]
+        assert fallback.data["severities"] == ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
 
     @pytest.mark.asyncio
     async def test_get_ips_events_non_empty_legacy_skips_v2(self, stats_manager, mock_connection):
@@ -301,22 +308,35 @@ class TestStatsManagerEnhanced:
         assert mock_connection.request.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_get_ips_events_v2_failure_after_empty_legacy_returns_empty(self, stats_manager, mock_connection):
-        """A failing v2 fallback must not turn an empty result into an exception.
+    async def test_get_ips_events_empty_legacy_and_absent_system_log_keeps_legacy_answer(
+        self, stats_manager, mock_connection
+    ):
+        """Legacy answered and the system log does not exist: the legacy answer stands.
 
         A controller old enough to have no v2 endpoint answers exactly this way,
         so raising here would break setups the legacy endpoint still serves.
         """
-        mock_connection.request.side_effect = [[], Exception("v2 unavailable")]
+        from aiounifi.errors import ResponseError
+
+        mock_connection.request.side_effect = [
+            [],
+            ResponseError(
+                "Call https://192.0.2.1/proxy/network/v2/api/site/default/system-log/all received 404 Not Found"
+            ),
+            ResponseError(
+                "Call https://192.0.2.1/proxy/network/v2/api/site/default/system-log/count received 404 Not Found"
+            ),
+        ]
 
         result = await stats_manager.get_ips_events()
 
         assert result == []
-        assert mock_connection.request.call_count == 2
+        paths = [call.args[0].path for call in mock_connection.request.call_args_list]
+        assert paths == ["/stat/ips/event", "/system-log/all", "/system-log/count"]
 
     @pytest.mark.asyncio
     async def test_get_ips_events_v2_failure_is_not_cached(self, stats_manager, mock_connection):
-        """A degraded empty result must not be cached as a confirmed quiet period."""
+        """A failed system-log cross-check must not be cached as a confirmed quiet period."""
         mock_connection.request.side_effect = [[], Exception("v2 unavailable")]
 
         await stats_manager.get_ips_events()

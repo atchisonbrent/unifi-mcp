@@ -195,7 +195,7 @@ Gateway-wide security / NAT / connection-tracking settings (the controller's `us
 
 ## Events & Alarms (5 tools)
 
-- `unifi_list_events` — List timestamped event log entries
+- `unifi_list_events` — List timestamped event log entries; filter by exact key, categories or severities; reports the controller's total and whether the page is truncated
 - `unifi_list_alarms` — List active alarms
 - `unifi_archive_alarm` — Archive a specific alarm
 - `unifi_archive_all_alarms` — Archive all active alarms

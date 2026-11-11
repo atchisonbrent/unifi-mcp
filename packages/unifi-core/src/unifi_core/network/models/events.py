@@ -63,6 +63,16 @@ class EventLog(BaseModel):
         description="Severity level when present (alerts / IPS events)",
         json_schema_extra={"mutable": False},
     )
+    category: Optional[str] = Field(
+        default=None,
+        description="System-log category (e.g., 'SECURITY'); v2 system-log events only",
+        json_schema_extra={"mutable": False},
+    )
+    subcategory: Optional[str] = Field(
+        default=None,
+        description="System-log subcategory when present; v2 system-log events only",
+        json_schema_extra={"mutable": False},
+    )
 
 
 MUTABLE_FIELDS: frozenset[str] = frozenset()
@@ -236,4 +246,6 @@ def event_log_from_controller(record: Any) -> EventLog:
         mac=_get(record, "user", "mac", "ap", "ap_mac", "device_mac") or _actor_mac(record),
         ip=_get(record, "ip", "src_ip") or _actor_ip(record),
         severity=_get(record, "severity", "level"),
+        category=_get(record, "category"),
+        subcategory=_get(record, "subcategory"),
     )

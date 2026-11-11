@@ -469,7 +469,7 @@ Manage the controller's native Dynamic DNS provider entries (Settings → Intern
 |------|------|-------------|
 | `unifi_get_event_types` | Read | Get recently observed exact event keys for filtering events. |
 | `unifi_list_alarms` | Read | Returns active alarms (security alerts, connectivity issues, firmware warnings). |
-| `unifi_list_events` | Read | Returns timestamped event log entries (client connects/disconnects, device state changes, firmware updates, config changes) sorted newest... |
+| `unifi_list_events` | Read | Returns timestamped event log entries (client connects/disconnects, device state changes, firmware updates, config changes, security even... |
 | `unifi_recent_events` | Read | Get recent events from the in-memory websocket buffer. |
 | `unifi_subscribe_events` | Read | Returns a handle describing how to subscribe to live network events. |
 | `unifi_archive_alarm` | Mutate | Archive (resolve/dismiss) a specific alarm by its ID |

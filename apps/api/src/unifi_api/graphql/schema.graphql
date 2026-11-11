@@ -716,6 +716,8 @@ type EventLog {
   mac: String
   ip: String
   severity: String
+  category: String
+  subcategory: String
 }
 
 """Paginated page of event-log entries."""

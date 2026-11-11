@@ -36,6 +36,8 @@ class EventLog:
     mac: str | None
     ip: str | None
     severity: str | None
+    category: str | None = None
+    subcategory: str | None = None
     # Tracks whether the source record was a dict (legacy serializer
     # returned ``{"id": None}`` for non-dict inputs).
     _was_dict: strawberry.Private[bool] = True
@@ -69,7 +71,10 @@ class EventLog:
             return {"id": None}
         d = asdict(self)
         d.pop("_was_dict", None)
-        # Legacy contract: ``severity`` is included only when non-None.
-        if d.get("severity") is None:
-            d.pop("severity", None)
+        # Legacy contract: ``severity`` is included only when non-None; the
+        # system-log ``category``/``subcategory`` follow the same rule so legacy
+        # records keep their shape.
+        for optional in ("severity", "category", "subcategory"):
+            if d.get(optional) is None:
+                d.pop(optional, None)
         return d

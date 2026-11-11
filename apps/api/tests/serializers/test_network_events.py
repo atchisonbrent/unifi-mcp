@@ -130,4 +130,21 @@ def test_recent_events_serializer_legacy_contract_preserved() -> None:
     assert out["mac"] == "aa:bb:cc:00:00:09"
     assert out["msg"] == "Client disconnected"
     assert "severity" not in out
+    assert "category" not in out
+    assert "subcategory" not in out
     assert NetworkRecentEventsSerializer.serialize("not-a-dict") == {"id": None}
+
+
+def test_recent_events_serializer_keeps_system_log_category_fields() -> None:
+    out = NetworkRecentEventsSerializer.serialize(
+        {
+            "id": "evt-0002",
+            "key": "THREAT_BLOCKED_KNOWN_SOURCE_CLIENT",
+            "severity": "HIGH",
+            "category": "SECURITY",
+            "subcategory": "INTRUSION_PREVENTION",
+        }
+    )
+    assert out["severity"] == "HIGH"
+    assert out["category"] == "SECURITY"
+    assert out["subcategory"] == "INTRUSION_PREVENTION"

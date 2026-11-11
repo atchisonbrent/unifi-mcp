@@ -124,6 +124,9 @@ DISPATCH_OVERRIDES: dict[str, tuple[str, str]] = {
     "unifi_get_device_stats": ("stats_manager", "get_device_stats_for_identifier"),
     "unifi_get_client_stats": ("stats_manager", "get_client_stats_for_identifier"),
     "unifi_get_top_clients": ("stats_manager", "get_top_clients"),
+    # The MCP tool reads get_ips_event_report for source/coverage metadata; the
+    # API's EventLog serializer consumes the plain list from get_ips_events.
+    "unifi_get_ips_events": ("stats_manager", "get_ips_events"),
     # Event tools obtain their Core manager through a lazy helper rather than
     # importing a runtime singleton, so the source AST has no direct binding.
     "unifi_list_events": ("event_manager", "get_events"),

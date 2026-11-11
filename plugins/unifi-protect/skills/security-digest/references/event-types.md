@@ -97,7 +97,18 @@ Events are sourced from three MCP servers: UniFi Protect, UniFi Access, and UniF
 ## UniFi Network Events
 
 **Source server:** `unifi-network-mcp`
-**Primary tools:** `unifi_list_events`, `unifi_list_alarms`
+**Primary tools:** `unifi_list_events`, `unifi_list_alarms`, `unifi_get_ips_events`
+
+**Filtering on current controllers.** UniFi Network controllers with the v2 system log do not accept the `EVT_*` codes below, and `unifi_list_events` rejects them there before sending. Filter by `categories` instead, or by an exact key from `unifi_get_event_types` (for example `CLIENT_CONNECTED_WIRELESS_2`, `THREAT_BLOCKED_KNOWN_SOURCE_CLIENT`):
+
+| Section below | `categories` value |
+|---------------|--------------------|
+| Device Events | `UNIFI_DEVICES` |
+| Client Events | `CLIENT_DEVICES` |
+| Security Alerts | `SECURITY` (or `unifi_get_ips_events` for intrusion prevention) |
+| Admin Actions | no dedicated category; check `unifi_get_event_types` for observed keys |
+
+The `EVT_*` codes remain valid as `event_type` on controllers that only have the legacy events API, and as `key` values in their records. Treat a window as quiet only when `complete` is true; `null` means coverage is unknown.
 
 ### Device Events
 

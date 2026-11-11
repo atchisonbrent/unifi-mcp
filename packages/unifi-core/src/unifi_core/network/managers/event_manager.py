@@ -5,6 +5,7 @@ Manages event log and alarm operations using the v2 system-log API
 """
 
 import logging
+import re
 import time
 from collections import deque
 from typing import Any, Callable, Dict, List, Optional
@@ -14,6 +15,19 @@ from aiounifi.models.message import MessageKey
 
 from unifi_core.mac import mac_equal
 from unifi_core.network.managers.connection_manager import ConnectionManager
+from unifi_core.network.system_log import (
+    EVENT_SEVERITIES,
+    SYSTEM_LOG_PAGE_SIZE,
+    PageTracker,
+    SystemLogIncompleteError,
+    SystemLogPage,
+    SystemLogResponseError,
+    controller_message,
+    coverage,
+    describe_request_error,
+    http_status,
+    parse_system_log_page,
+)
 
 logger = logging.getLogger("unifi-network-mcp")
 
@@ -68,20 +82,111 @@ class EventBuffer:
         return len(self._buffer)
 
 
+#: System-log categories this server knows, with descriptions. They are the
+#: default query when a caller names none. The controller may accept categories
+#: missing from this list, so caller-supplied categories are checked for shape
+#: only and the controller's verdict is passed back.
+KNOWN_EVENT_CATEGORIES: Dict[str, str] = {
+    "CLIENT_DEVICES": "Client device connect/disconnect events",
+    "INTERNET_AND_WAN": "Internet outage, failover, and performance",
+    "POWER": "PoE, power supply, and UPS events",
+    "SECURITY": "Firewall, IPS, honeypot events",
+    "UNIFI_DEVICES": "Device adoption, discovery, reconnection",
+    "SOFTWARE_UPDATES": "Firmware update events",
+    "UNIFI_ETHERNET_PORTS": "Port events (STP, storms, errors)",
+    "VPN": "VPN client and site-to-site events",
+}
+
 # Default categories for the system-log v2 API
-_DEFAULT_CATEGORIES = [
-    "CLIENT_DEVICES",
-    "INTERNET_AND_WAN",
-    "POWER",
-    "SECURITY",
-    "UNIFI_DEVICES",
-    "SOFTWARE_UPDATES",
-    "UNIFI_ETHERNET_PORTS",
-    "VPN",
-]
+_DEFAULT_CATEGORIES = list(KNOWN_EVENT_CATEGORIES)
 
 # Default severities
-_DEFAULT_SEVERITIES = ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
+_DEFAULT_SEVERITIES = list(EVENT_SEVERITIES)
+
+#: Bound on system-log pages read for one list_events call. Beyond it the result
+#: is reported as truncated rather than fetched without limit.
+EVENT_LIST_MAX_PAGES = 50
+
+_CATEGORY_SHAPE = re.compile(r"[A-Z][A-Z0-9_]*")
+
+_LEGACY_PREFIX_ERROR = (
+    "event_type '{value}' is a legacy EVT_* key or prefix, which the system log on current UniFi "
+    "Network controllers does not accept. Pass an exact event key (unifi_get_event_types lists "
+    "recently observed keys) or filter by categories instead."
+)
+
+
+def _validate_categories(categories: Optional[List[str]]) -> Optional[List[str]]:
+    """Check caller-supplied categories for shape; the controller decides membership."""
+    if categories is None:
+        return None
+    if not isinstance(categories, list):
+        raise ValueError("categories must be a list of category names")
+    known = ", ".join(_DEFAULT_CATEGORIES)
+    validated: List[str] = []
+    for category in categories:
+        if not isinstance(category, str) or not _CATEGORY_SHAPE.fullmatch(category) or category.startswith("EVT_"):
+            raise ValueError(
+                f"Invalid category {category!r}: categories are upper-case identifiers such as SECURITY, "
+                f"not event keys. Known categories: {known}."
+            )
+        if category not in validated:
+            validated.append(category)
+    return validated or None
+
+
+def _validate_query_window(within: Any, limit: Any, start: Any, event_type: Any) -> None:
+    """Reject arguments that would produce an empty or inverted query window."""
+
+    def is_int(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    if not is_int(within) or within < 1:
+        raise ValueError(f"within_hours must be an integer of at least 1, got {within!r}")
+    if not is_int(limit) or limit < 1:
+        raise ValueError(f"limit must be an integer of at least 1, got {limit!r}")
+    if not is_int(start) or start < 0:
+        raise ValueError(f"start must be an integer of at least 0, got {start!r}")
+    if event_type is not None and not isinstance(event_type, str):
+        raise ValueError(f"event_type must be a string, got {type(event_type).__name__}")
+
+
+def _page_is_misaligned(page: SystemLogPage, tracker: PageTracker) -> bool:
+    """True when a page reached by jumping to ``start // page_size`` cannot be where the jump assumed.
+
+    Judged from the controller's counts against the events the page should
+    hold: with an exact total, exactly ``min(page_size, total - offset)``; with
+    a lower-bound total, at least that many; with only a page count, a full page
+    unless it is the last. With no counts there is nothing to check against.
+    A short page that the counts accept still needs the page-0 stride check
+    in ``_get_events_v2``: counts cannot tell a short final page from a
+    server that pages by fewer events than requested.
+    """
+    offset = tracker.served - len(page.events)
+    if tracker.total is not None:
+        expected = min(tracker.page_size, max(tracker.total - offset, 0))
+        if tracker.total_is_lower_bound:
+            return len(page.events) < expected
+        return len(page.events) != expected
+    if tracker.total_pages is not None:
+        page_number = offset // tracker.page_size
+        return page_number + 1 < tracker.total_pages and len(page.events) < tracker.page_size
+    return False
+
+
+def _validate_severities(severities: Optional[List[str]]) -> Optional[List[str]]:
+    """Check caller-supplied severities against the system log's fixed scale."""
+    if severities is None:
+        return None
+    if not isinstance(severities, list):
+        raise ValueError("severities must be a list of severity names")
+    validated: List[str] = []
+    for severity in severities:
+        if severity not in EVENT_SEVERITIES:
+            raise ValueError(f"Invalid severity {severity!r}. Valid severities: {', '.join(EVENT_SEVERITIES)}.")
+        if severity not in validated:
+            validated.append(severity)
+    return validated or None
 
 
 class EventManager:
@@ -259,7 +364,7 @@ class EventManager:
             # "this controller predates v2" sends every later call down a legacy
             # path that modern controllers answer with 404, and without this the
             # only visible symptom is that 404.
-            self._v2_probe_error = f"{type(probe_error).__name__}: {probe_error}"
+            self._v2_probe_error = f"{type(probe_error).__name__}: {describe_request_error(probe_error)}"
             logger.warning(
                 "[events] v2 system-log probe failed, falling back to legacy /stat/event API: %s",
                 probe_error,
@@ -275,7 +380,7 @@ class EventManager:
         if not self._v2_probe_error:
             return error
         return RuntimeError(
-            f"{endpoint} failed ({error}). This controller was put on the legacy events API "
+            f"{endpoint} failed ({describe_request_error(error)}). This controller was put on the legacy events API "
             f"because the v2 system-log probe failed: {self._v2_probe_error}. "
             "On current UniFi Network versions the legacy endpoint no longer exists, so the "
             "underlying problem is the failed v2 probe, not the missing legacy path."
@@ -311,11 +416,71 @@ class EventManager:
         Returns:
             List of event objects.
         """
+        page = await self.get_events_page(
+            within=within,
+            limit=limit,
+            start=start,
+            event_type=event_type,
+            categories=categories,
+            severities=severities,
+        )
+        return page["events"]
+
+    async def get_events_page(
+        self,
+        within: int = 24,
+        limit: int = 100,
+        start: int = 0,
+        event_type: Optional[str] = None,
+        categories: Optional[List[str]] = None,
+        severities: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Get events plus the controller's total and how much of it was returned.
+
+        Arguments are validated before any request: ``within`` and ``limit`` at
+        least 1, ``start`` at least 0, ``event_type`` a string, categories by
+        shape and severities against the system log's scale. On the v2 system
+        log a legacy ``EVT_*`` event_type is rejected rather than sent, since the
+        controller answers it with HTTP 400. Categories and severities need the
+        system log; a legacy-API controller rejects them.
+
+        Returns:
+            Dict with ``events``, ``source`` (``"system-log"`` or ``"legacy"``),
+            ``total`` (controller's count for the whole filtered window, or None),
+            ``complete``/``truncated`` (see ``unifi_core.network.system_log``;
+            never complete when ``start`` > 0), ``has_more`` (True when events
+            exist after this page, False only when an exact total is reached,
+            None when the total is absent or a reached lower bound), and the
+            ``categories`` and ``severities`` actually sent (None on the legacy API).
+        """
+        _validate_query_window(within, limit, start, event_type)
+        categories = _validate_categories(categories)
+        severities = _validate_severities(severities)
+
         await self._ensure_api_version()
 
         if self._use_v2:
+            if event_type and event_type.upper().startswith("EVT_"):
+                raise ValueError(_LEGACY_PREFIX_ERROR.format(value=event_type))
             return await self._get_events_v2(within, limit, start, event_type, categories, severities)
-        return await self._get_events_legacy(within, limit, start, event_type)
+
+        if categories or severities:
+            raise ValueError(
+                "categories and severities require the system log; this controller is on the legacy "
+                "events API (/stat/event), which cannot filter by them. Omit them, or filter by event_type."
+            )
+
+        events = await self._get_events_legacy(within, limit, start, event_type)
+        return {
+            "events": events,
+            "source": "legacy",
+            "total": None,
+            "complete": None,
+            "truncated": None,
+            "has_more": None,
+            "categories": None,
+            "severities": None,
+        }
 
     async def _get_events_v2(
         self,
@@ -325,23 +490,51 @@ class EventManager:
         event_type: Optional[str],
         categories: Optional[List[str]],
         severities: Optional[List[str]],
-    ) -> List[Dict[str, Any]]:
-        """Get events using the v2 system-log API."""
-        if limit <= 0:
-            return []
+    ) -> Dict[str, Any]:
+        """Get events using the v2 system-log API.
 
+        A read with ``start > 0`` jumps straight to page ``start // page_size``,
+        which assumes the server numbers pages by the requested page size. The
+        page it gets back is verified before it is used:
+
+        - If its length does not fit the controller's counts, the jump was wrong.
+        - If it is non-empty but shorter than the page size, the counts cannot
+          tell a short final page from a server that pages by fewer events, so
+          page 0 is fetched once: a short page 0 means the server's pages are
+          shorter than requested; a full page 0 means the jump was sound.
+        - A full or empty jumped page is used as it is, with no extra request.
+
+        On a wrong jump the read restarts from page 0 (reusing the page 0
+        already fetched), reads on with the server's page length and discards
+        the first ``start`` events locally. A restart costs the pages from 0 up
+        to the requested window; every request, the check included, counts
+        toward ``EVENT_LIST_MAX_PAGES``, and a read that hits the cap is
+        truncated. A failed check fails the read.
+        """
+        applied_categories = categories or _DEFAULT_CATEGORIES
+        applied_severities = severities or _DEFAULT_SEVERITIES
+        result: Dict[str, Any] = {
+            "events": [],
+            "source": "system-log",
+            "total": None,
+            "complete": None,
+            "truncated": None,
+            "has_more": None,
+            "categories": list(applied_categories),
+            "severities": list(applied_severities),
+        }
         try:
             now_ms = int(time.time() * 1000)
             from_ms = now_ms - (within * 3600 * 1000)
-            page_size = min(limit, 100)
-            page_number = max(start, 0) // page_size
-            page_offset = max(start, 0) % page_size
+            page_size = min(limit, SYSTEM_LOG_PAGE_SIZE)
+            page_number = start // page_size
+            page_offset = start % page_size
 
             payload: Dict[str, Any] = {
                 "timestampFrom": from_ms,
                 "timestampTo": now_ms,
-                "severities": severities or _DEFAULT_SEVERITIES,
-                "categories": categories or _DEFAULT_CATEGORIES,
+                "severities": list(applied_severities),
+                "categories": list(applied_categories),
                 "type": "GENERAL",
                 "pageNumber": page_number,
                 "pageSize": page_size,
@@ -355,43 +548,103 @@ class EventManager:
                 payload["keys"] = [event_type]
 
             events: List[Dict[str, Any]] = []
-            while len(events) < limit + page_offset:
-                payload["pageNumber"] = page_number
-                api_request = ApiRequestV2(
-                    method="post",
-                    path="/system-log/all",
-                    data=payload.copy(),
-                )
-                response = await self._connection.request(api_request)
+            tracker = PageTracker(page_size, base=page_number * page_size)
+            check_alignment = page_number > 0
+            pages_read = 0
+            more = True
 
-                envelope: Any = response
-                if isinstance(response, list) and response and isinstance(response[0], dict) and "data" in response[0]:
-                    envelope = response[0]
+            async def read_page(number: int) -> SystemLogPage:
+                payload["pageNumber"] = number
+                api_request = ApiRequestV2(method="post", path="/system-log/all", data=payload.copy())
+                return parse_system_log_page(await self._connection.request(api_request))
 
-                if isinstance(envelope, dict):
-                    page = envelope.get("data", envelope.get("logs", []))
-                    total_pages = envelope.get("total_page_count", envelope.get("totalPageCount"))
-                elif isinstance(envelope, list):
-                    page = envelope
-                    total_pages = None
-                else:
-                    page = []
-                    total_pages = None
-
-                if not isinstance(page, list) or not page:
-                    break
-                events.extend(event for event in page if isinstance(event, dict))
+            while more and len(events) < limit + page_offset and pages_read < EVENT_LIST_MAX_PAGES:
+                requested = page_number
+                try:
+                    page = await read_page(page_number)
+                    pages_read += 1
+                    tracker.observe(page)
+                    if check_alignment:
+                        check_alignment = False
+                        first = None
+                        misaligned = _page_is_misaligned(page, tracker)
+                        if misaligned or 0 < len(page.events) < page_size:
+                            requested = 0
+                            first = await read_page(0)
+                            pages_read += 1
+                            if page.events and not first.events:
+                                raise SystemLogResponseError(
+                                    f"system log page 1 is empty, but page {page_number + 1} held events"
+                                )
+                            # Page 0 decides: a full one means pages are numbered by the
+                            # requested size, so the jumped page stands whatever the counts
+                            # suggested; a short one means the read must start over.
+                            misaligned = len(first.events) < page_size
+                        if misaligned:
+                            logger.info(
+                                "[events] system-log page %s does not match page size %s; re-reading from page 0",
+                                page_number,
+                                page_size,
+                            )
+                            stride = len(first.events) if 0 < len(first.events) < page_size else page_size
+                            tracker = PageTracker(stride)
+                            tracker.observe(first)
+                            events, page, page_number, page_offset = [], first, 0, start
+                    more = tracker.has_next_page(page, page_number)
+                except Exception as page_error:
+                    if pages_read == 0:
+                        raise self._explain_rejected_filter(page_error, categories, event_type) from page_error
+                    raise SystemLogIncompleteError(
+                        f"system-log page {requested + 1} failed after {len(events)} events were read "
+                        f"({describe_request_error(page_error)})"
+                    ) from page_error
+                events.extend(page.events)
                 page_number += 1
 
-                if isinstance(total_pages, int) and page_number >= total_pages:
-                    break
-                if total_pages is None and len(page) < page_size:
-                    break
-
-            return events[page_offset : page_offset + limit]
+            fetched_past_limit = len(events) > page_offset + limit
+            events = events[page_offset : page_offset + limit]
+            total, lower_bound = tracker.total, tracker.total_is_lower_bound
+            result["events"] = events
+            result["total"] = total
+            result.update(coverage(len(events), total, lower_bound, stopped_early=more or fetched_past_limit))
+            if start > 0 and result["complete"]:
+                # A later page never covers the whole window, even when it is the last one.
+                result["complete"] = False
+            served = start + len(events)
+            if total is not None and served < total:
+                result["has_more"] = True
+            elif total is not None and not lower_bound:
+                result["has_more"] = False
+            elif fetched_past_limit:
+                result["has_more"] = True
+            return result
         except Exception as e:
             logger.error("Error getting events (v2): %s", e)
             raise
+
+    @staticmethod
+    def _explain_rejected_filter(
+        error: Exception, categories: Optional[List[str]], event_type: Optional[str]
+    ) -> Exception:
+        """Turn a first-page failure into a caller-safe error.
+
+        A controller 400 on caller-supplied filters becomes an actionable
+        ``ValueError``; this server's own response errors pass through; any
+        other failure is described without the controller's address.
+        """
+        if isinstance(error, SystemLogResponseError):
+            return error
+        if http_status(error) != 400 or not (categories or event_type):
+            return RuntimeError(f"system-log request failed ({describe_request_error(error)})")
+        hints = []
+        if categories:
+            hints.append(
+                f"Categories known to this server: {', '.join(_DEFAULT_CATEGORIES)} "
+                "(the controller may accept others, and may reject some of these)."
+            )
+        if event_type:
+            hints.append("event_type must be an exact event key; unifi_get_event_types lists recently observed keys.")
+        return ValueError(f"The controller rejected the event filter: {controller_message(error)}. {' '.join(hints)}")
 
     async def _get_events_legacy(
         self,
@@ -539,14 +792,8 @@ class EventManager:
     def get_event_categories(self) -> List[Dict[str, str]]:
         """Get available event categories for v2 API filtering."""
         return [
-            {"category": "CLIENT_DEVICES", "description": "Client device connect/disconnect events"},
-            {"category": "INTERNET_AND_WAN", "description": "Internet outage, failover, and performance"},
-            {"category": "POWER", "description": "PoE, power supply, and UPS events"},
-            {"category": "SECURITY", "description": "Firewall, IPS, honeypot events"},
-            {"category": "UNIFI_DEVICES", "description": "Device adoption, discovery, reconnection"},
-            {"category": "SOFTWARE_UPDATES", "description": "Firmware update events"},
-            {"category": "UNIFI_ETHERNET_PORTS", "description": "Port events (STP, storms, errors)"},
-            {"category": "VPN", "description": "VPN client and site-to-site events"},
+            {"category": category, "description": description}
+            for category, description in KNOWN_EVENT_CATEGORIES.items()
         ]
 
     async def archive_alarm(self, alarm_id: str) -> bool:

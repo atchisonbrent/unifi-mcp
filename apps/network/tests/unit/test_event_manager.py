@@ -81,8 +81,9 @@ class TestEventManagerV2:
         assert [request.data["pageNumber"] for request in requests] == [10, 11]
 
     @pytest.mark.asyncio
-    async def test_get_events_zero_limit_makes_no_request(self, event_manager, mock_connection):
-        assert await event_manager.get_events(limit=0) == []
+    async def test_get_events_zero_limit_is_rejected_without_a_request(self, event_manager, mock_connection):
+        with pytest.raises(ValueError, match="limit must be an integer of at least 1"):
+            await event_manager.get_events(limit=0)
         mock_connection.request.assert_not_awaited()
 
     @pytest.mark.asyncio

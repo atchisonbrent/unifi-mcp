@@ -50,6 +50,18 @@ class _StubEventManager:
     async def get_events(self, **_kwargs):
         return self._records
 
+    async def get_events_page(self, **_kwargs):
+        return {
+            "events": self._records,
+            "source": "system-log",
+            "total": len(self._records),
+            "complete": True,
+            "truncated": False,
+            "has_more": False,
+            "categories": None,
+            "severities": None,
+        }
+
     async def get_event_types(self):
         return self._records
 

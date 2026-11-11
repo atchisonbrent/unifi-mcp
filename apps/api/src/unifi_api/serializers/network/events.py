@@ -34,9 +34,12 @@ class NetworkRecentEventsSerializer(Serializer):
         if not isinstance(record, dict):
             return {"id": None}
         out = event_log_from_controller(record).model_dump()
-        # Legacy contract: ``severity`` is included only when non-None.
-        if out.get("severity") is None:
-            out.pop("severity", None)
+        # Legacy contract: ``severity`` is included only when non-None; the
+        # system-log ``category``/``subcategory`` follow the same rule so legacy
+        # records keep their shape.
+        for optional in ("severity", "category", "subcategory"):
+            if out.get(optional) is None:
+                out.pop(optional, None)
         return out
 
 

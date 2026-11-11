@@ -4940,20 +4940,31 @@
       "manager_method": "get_events",
       "input_schema": {
         "properties": {
+          "categories": {
+            "description": "System-log categories to include, as upper-case identifiers (for example ['SECURITY']). Omit for the default set; the controller rejects categories it does not know. Requires the system log",
+            "type": "array"
+          },
           "event_type": {
-            "description": "Filter by an exact event key (for example 'CLIENT_DISCONNECTED_WIRELESS_2'). Use unifi_get_event_types to see recently observed keys",
+            "description": "Filter by an exact event key (for example 'CLIENT_DISCONNECTED_WIRELESS_2'). Use unifi_get_event_types to see recently observed keys. Legacy EVT_* keys are rejected on controllers with the system log",
             "type": "string"
           },
           "limit": {
-            "description": "Maximum number of events to return (default 100)",
+            "description": "Maximum number of events to return (default 100, minimum 1)",
+            "minimum": 1,
             "type": "integer"
           },
+          "severities": {
+            "description": "Severities to include: any of LOW, MEDIUM, HIGH, VERY_HIGH. Omit for all. Requires the system log",
+            "type": "array"
+          },
           "start": {
-            "description": "Offset for pagination, skip the first N events (default 0)",
+            "description": "Offset for pagination, skip the first N events (default 0, minimum 0)",
+            "minimum": 0,
             "type": "integer"
           },
           "within_hours": {
-            "description": "Only return events from the last N hours (default 24)",
+            "description": "Only return events from the last N hours (default 24, minimum 1)",
+            "minimum": 1,
             "type": "integer"
           }
         },

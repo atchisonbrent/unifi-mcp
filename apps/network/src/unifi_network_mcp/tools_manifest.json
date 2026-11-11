@@ -11629,25 +11629,36 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Returns timestamped event log entries (client connects/disconnects, device state changes, firmware updates, config changes) sorted newest-first. Filter by within_hours (default 24), an exact event_type key (use unifi_get_event_types for recently observed keys), and paginate with start/limit. For critical alerts specifically, use unifi_list_alarms instead.",
+      "description": "Returns timestamped event log entries (client connects/disconnects, device state changes, firmware updates, config changes, security events) sorted newest-first. Filter by within_hours (default 24), an exact event_type key (use unifi_get_event_types for recently observed keys; on controllers with the system log, legacy EVT_* keys and prefixes are rejected, while legacy-API controllers still accept them), categories (default: CLIENT_DEVICES, INTERNET_AND_WAN, POWER, SECURITY, UNIFI_DEVICES, SOFTWARE_UPDATES, UNIFI_ETHERNET_PORTS, VPN) and severities (LOW, MEDIUM, HIGH, VERY_HIGH); categories and severities need the system log. Paginate with start/limit. 'total' is the controller's count for the whole filtered window; 'truncated' is true when this response holds fewer events than the window has; 'complete' is never true for start > 0. When the read stopped at the limit or the page cap, 'complete' and 'truncated' are false/true even without a total; they are null only when the read ended without an exact total (none, or only a lower bound). 'has_more' says whether events follow this page, null when the total is absent or a reached lower bound. One call reads at most 50 pages; beyond that the result is truncated. For critical alerts specifically, use unifi_list_alarms instead.",
       "name": "unifi_list_events",
       "schema": {
         "input": {
           "properties": {
+            "categories": {
+              "description": "System-log categories to include, as upper-case identifiers (for example ['SECURITY']). Omit for the default set; the controller rejects categories it does not know. Requires the system log",
+              "type": "array"
+            },
             "event_type": {
-              "description": "Filter by an exact event key (for example 'CLIENT_DISCONNECTED_WIRELESS_2'). Use unifi_get_event_types to see recently observed keys",
+              "description": "Filter by an exact event key (for example 'CLIENT_DISCONNECTED_WIRELESS_2'). Use unifi_get_event_types to see recently observed keys. Legacy EVT_* keys are rejected on controllers with the system log",
               "type": "string"
             },
             "limit": {
-              "description": "Maximum number of events to return (default 100)",
+              "description": "Maximum number of events to return (default 100, minimum 1)",
+              "minimum": 1,
               "type": "integer"
             },
+            "severities": {
+              "description": "Severities to include: any of LOW, MEDIUM, HIGH, VERY_HIGH. Omit for all. Requires the system log",
+              "type": "array"
+            },
             "start": {
-              "description": "Offset for pagination, skip the first N events (default 0)",
+              "description": "Offset for pagination, skip the first N events (default 0, minimum 0)",
+              "minimum": 0,
               "type": "integer"
             },
             "within_hours": {
-              "description": "Only return events from the last N hours (default 24)",
+              "description": "Only return events from the last N hours (default 24, minimum 1)",
+              "minimum": 1,
               "type": "integer"
             }
           },

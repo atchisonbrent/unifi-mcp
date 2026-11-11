@@ -5,14 +5,16 @@ This module provides MCP tools to view events and manage alarms on a UniFi Netwo
 """
 
 import logging
-from typing import Annotated, Any, Dict, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from unifi_core.confirmation import preview_response
+from unifi_core.network.managers.event_manager import EVENT_LIST_MAX_PAGES, KNOWN_EVENT_CATEGORIES
 from unifi_core.network.models.events import event_log_from_controller
 from unifi_core.network.models.system import alarm_from_controller, event_types_from_controller
+from unifi_core.network.system_log import EVENT_SEVERITIES, safe_error_text
 from unifi_network_mcp.runtime import server
 
 logger = logging.getLogger(__name__)
@@ -37,49 +39,84 @@ def _get_event_manager():
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
     description=(
         "Returns timestamped event log entries (client connects/disconnects, device "
-        "state changes, firmware updates, config changes) sorted newest-first. "
+        "state changes, firmware updates, config changes, security events) sorted newest-first. "
         "Filter by within_hours (default 24), an exact event_type key (use "
-        "unifi_get_event_types for recently observed keys), and paginate with start/limit. "
+        "unifi_get_event_types for recently observed keys; on controllers with the system log, legacy "
+        "EVT_* keys and prefixes are rejected, while legacy-API controllers still accept them), "
+        f"categories (default: {', '.join(KNOWN_EVENT_CATEGORIES)}) and severities "
+        f"({', '.join(EVENT_SEVERITIES)}); categories and severities need the system log. "
+        "Paginate with start/limit. 'total' is the controller's count for the whole filtered window; "
+        "'truncated' is true when this response holds fewer events than the window has; 'complete' is "
+        "never true for start > 0. When the read stopped at the limit or the page cap, 'complete' and "
+        "'truncated' are false/true even without a total; they are null only when the read ended without "
+        "an exact total (none, or only a lower bound). 'has_more' says whether events follow this page, "
+        "null when the total is absent or a reached lower bound. "
+        f"One call reads at most {EVENT_LIST_MAX_PAGES} pages; beyond that the result is truncated. "
         "For critical alerts specifically, use unifi_list_alarms instead."
     ),
 )
 async def list_events(
-    within_hours: Annotated[int, Field(description="Only return events from the last N hours (default 24)")] = 24,
-    limit: Annotated[int, Field(description="Maximum number of events to return (default 100)")] = 100,
-    start: Annotated[int, Field(description="Offset for pagination, skip the first N events (default 0)")] = 0,
+    within_hours: Annotated[
+        int, Field(description="Only return events from the last N hours (default 24, minimum 1)", ge=1)
+    ] = 24,
+    limit: Annotated[int, Field(description="Maximum number of events to return (default 100, minimum 1)", ge=1)] = 100,
+    start: Annotated[
+        int, Field(description="Offset for pagination, skip the first N events (default 0, minimum 0)", ge=0)
+    ] = 0,
     event_type: Annotated[
         Optional[str],
         Field(
-            description="Filter by an exact event key (for example 'CLIENT_DISCONNECTED_WIRELESS_2'). Use unifi_get_event_types to see recently observed keys"
+            description="Filter by an exact event key (for example 'CLIENT_DISCONNECTED_WIRELESS_2'). Use unifi_get_event_types to see recently observed keys. Legacy EVT_* keys are rejected on controllers with the system log"
+        ),
+    ] = None,
+    categories: Annotated[
+        Optional[List[str]],
+        Field(
+            description="System-log categories to include, as upper-case identifiers (for example ['SECURITY']). Omit for the default set; the controller rejects categories it does not know. Requires the system log"
+        ),
+    ] = None,
+    severities: Annotated[
+        Optional[List[str]],
+        Field(
+            description=f"Severities to include: any of {', '.join(EVENT_SEVERITIES)}. Omit for all. Requires the system log"
         ),
     ] = None,
 ) -> Dict[str, Any]:
     """List events with optional filtering."""
     try:
         event_manager = _get_event_manager()
-        events = await event_manager.get_events(
+        page = await event_manager.get_events_page(
             within=within_hours,
             limit=limit,
             start=start,
             event_type=event_type,
+            categories=categories,
+            severities=severities,
         )
 
-        shaped = [event_log_from_controller(e).model_dump(exclude_none=True) for e in events]
+        shaped = [event_log_from_controller(e).model_dump(exclude_none=True) for e in page["events"]]
         return {
             "success": True,
             "site": event_manager._connection.site,
             "count": len(shaped),
+            "total": page["total"],
+            "complete": page["complete"],
+            "truncated": page["truncated"],
+            "has_more": page["has_more"],
+            "source": page["source"],
             "filters": {
                 "within_hours": within_hours,
                 "limit": limit,
                 "start": start,
                 "event_type": event_type,
+                "categories": page["categories"],
+                "severities": page["severities"],
             },
             "events": shaped,
         }
     except Exception as e:
         logger.error("Error listing events: %s", e, exc_info=True)
-        return {"success": False, "error": f"Failed to list events: {e}"}
+        return {"success": False, "error": f"Failed to list events: {safe_error_text(e)}"}
 
 
 @server.tool(

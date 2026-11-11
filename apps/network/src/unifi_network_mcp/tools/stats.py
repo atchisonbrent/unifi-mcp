@@ -10,6 +10,7 @@ from typing import Annotated, Any, Dict, Optional
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from unifi_core.network.managers.stats_manager import IPS_SYSTEM_LOG_MAX_EVENTS
 from unifi_core.network.models.sessions import (
     client_session_from_controller,
     client_wifi_details_from_controller,
@@ -17,6 +18,7 @@ from unifi_core.network.models.sessions import (
 from unifi_core.network.models.stats import dpi_stats_from_controller
 from unifi_core.network.models.system import speedtest_result_from_controller, top_client_from_controller
 from unifi_core.network.read_views import shape_alerts, shape_dashboard
+from unifi_core.network.system_log import safe_error_text
 from unifi_network_mcp.runtime import client_manager, device_manager, server, stats_manager
 
 logger = logging.getLogger(__name__)
@@ -451,9 +453,14 @@ async def get_client_dpi_traffic(
 @server.tool(
     name="unifi_get_ips_events",
     description=(
-        "Get IPS/IDS security events (intrusion detection/prevention alerts). "
-        "Note: on newer UniFi OS / Network Application versions, IPS events may not populate "
-        "this legacy endpoint. Check the controller's traffic flows for threat data instead."
+        "Get IPS/IDS security events (intrusion detection/prevention alerts). Uses the legacy IPS "
+        "endpoint where it exists and otherwise the system log's SECURITY category at every severity "
+        f"(up to {IPS_SYSTEM_LOG_MAX_EVENTS:,} events). 'source' names which answered; 'total', 'complete' "
+        "and 'truncated' say whether 'events' covers the whole window: when the read stopped at the limit "
+        "or the page cap they are false/true even without a total, and they are null only when the read "
+        "ended without an exact total (none, or only a lower bound), so coverage is unknown. Fails rather "
+        "than reporting zero events unless a source confirmed the window: the system log with an exact "
+        "total of 0, or the legacy endpoint on a controller without a system log."
     ),
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
 )
@@ -462,23 +469,50 @@ async def get_ips_events(
         str,
         Field(description="Time period: 'hourly' (1h, default), 'daily' (24h), 'weekly' (7d), or 'monthly' (30d)"),
     ] = "daily",
-    limit: Annotated[int, Field(description="Maximum number of events to return (default 50)")] = 50,
+    limit: Annotated[int, Field(description="Maximum number of events to return (default 50, minimum 1)", ge=1)] = 50,
 ) -> Dict[str, Any]:
     """Implementation for getting IPS/IDS events."""
     try:
         duration_hours = {"hourly": 1, "daily": 24, "weekly": 168, "monthly": 720}.get(duration, 24)
-        events = await stats_manager.get_ips_events(duration_hours=duration_hours, limit=limit)
-        return {
+        report = await stats_manager.get_ips_event_report(duration_hours=duration_hours, limit=limit)
+        events = report["events"]
+        if report.get("system_log_cross_check") == "failed":
+            # Fail closed: the legacy endpoint's empty answer was not confirmed by
+            # the system log, so it is not reported as a quiet window.
+            return {
+                "success": False,
+                "error": (
+                    "Failed to get IPS events: the legacy IPS endpoint /stat/ips/event returned no events, "
+                    "and the system-log cross-check /system-log/all failed "
+                    f"({report.get('system_log_cross_check_error')}), so the absence of events is unconfirmed"
+                ),
+                "source": report["source"],
+                "window": report["window"],
+                "events": events,
+                "system_log_cross_check": "failed",
+                "system_log_cross_check_error": report.get("system_log_cross_check_error"),
+            }
+        result = {
             "success": True,
             "site": stats_manager._connection.site,
             "duration": duration,
             "limit": limit,
             "count": len(events),
+            "source": report["source"],
+            "window": report["window"],
+            "total": report["total"],
+            "complete": report["complete"],
+            "truncated": report["truncated"],
+            "max_events": report["max_events"],
             "events": events,
         }
+        for key in ("system_log_cross_check", "system_log_cross_check_error"):
+            if key in report:
+                result[key] = report[key]
+        return result
     except Exception as e:
         logger.error("Error getting IPS events: %s", e, exc_info=True)
-        return {"success": False, "error": f"Failed to get IPS events: {e}"}
+        return {"success": False, "error": f"Failed to get IPS events: {safe_error_text(e)}"}
 
 
 @server.tool(

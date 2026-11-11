@@ -1,3 +1,4 @@
+import copy
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -12,8 +13,24 @@ from unifi_core.mac import mac_equal, normalize_mac
 from unifi_core.network.managers.client_manager import ClientManager  # Needed for get_top_clients
 from unifi_core.network.managers.connection_manager import ConnectionManager
 from unifi_core.network.managers.device_manager import DeviceManager
+from unifi_core.network.system_log import (
+    EVENT_SEVERITIES,
+    SYSTEM_LOG_PAGE_SIZE,
+    PageTracker,
+    SystemLogIncompleteError,
+    SystemLogResponseError,
+    coverage,
+    describe_request_error,
+    is_endpoint_absent,
+    parse_system_log_page,
+)
 
 logger = logging.getLogger("unifi-network-mcp")
+
+#: Bound on system-log pages read for one IPS query. Beyond it the result is
+#: reported as truncated rather than fetched without limit.
+IPS_SYSTEM_LOG_MAX_PAGES = 10
+IPS_SYSTEM_LOG_MAX_EVENTS = IPS_SYSTEM_LOG_MAX_PAGES * SYSTEM_LOG_PAGE_SIZE
 
 # Cache prefixes
 CACHE_PREFIX_STATS_NETWORK = "stats_network"
@@ -536,20 +553,78 @@ class StatsManager:
             raise
 
     async def get_ips_events(self, duration_hours: int = 24, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get IPS/IDS events.
+        """Get IPS/IDS events as a plain list.
+
+        See ``get_ips_event_report`` for the source and coverage metadata. When
+        an empty legacy answer could not be cross-checked against the system log
+        (``system_log_cross_check="failed"``), this deliberately still returns
+        the legacy answer (``[]``); the MCP tool fails closed in that case, so
+        callers that need a confirmed window should use the report.
 
         Args:
             duration_hours: Number of hours to look back.
             limit: Maximum number of events to return.
         """
+        report = await self.get_ips_event_report(duration_hours=duration_hours, limit=limit)
+        return report["events"]
+
+    async def get_ips_event_report(self, duration_hours: int = 24, limit: int = 50) -> Dict[str, Any]:
+        """Get IPS/IDS events with the source that answered and how complete the answer is.
+
+        The legacy ``/stat/ips/event`` endpoint is asked first and its non-empty
+        answer is used as-is. When it is unavailable, or answers with nothing,
+        the v2 system log is queried for SECURITY events at every severity.
+
+        - legacy unavailable, system log answers: ``source="system-log"`` with
+          the controller's total and the coverage flags.
+        - legacy unavailable, system log fails, answers in an unreadable or
+          self-contradictory shape, or answers empty without an exact total
+          (none, or only a lower bound): raises.
+          Nothing is cached.
+        - legacy answers empty and the system log is absent (``/system-log/all``
+          and the ``/system-log/count`` probe both 404/405): the legacy answer
+          stands with ``system_log_cross_check="absent"``; controllers that
+          predate the system log answer exactly this way. Not cached, since a
+          404 can also come from a proxy or path problem.
+        - legacy answers empty and the system log exists but fails (including a
+          failure after earlier pages were read): the legacy answer is returned
+          uncached with ``system_log_cross_check="failed"`` and the error.
+          Callers that need a confirmed answer must treat this as a failure.
+
+        Raises:
+            ValueError: when ``limit`` is below 1.
+
+        Returns:
+            Dict with ``events``, ``source``, ``window``, ``total``, ``complete``,
+            ``truncated``, ``max_events`` and, for legacy answers,
+            ``system_log_cross_check`` (``"skipped"``, ``"absent"`` or ``"failed"``).
+            A copy, so callers may modify it without touching the cache.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError(f"limit must be an integer of at least 1, got {limit!r}")
+
         cache_key = f"{CACHE_PREFIX_STATS_IPS}_{duration_hours}_{limit}_{self._connection.site}"
         cached_data = self._connection.get_cached(cache_key, timeout=300)  # 5 minute cache
         if cached_data is not None:
-            return cached_data
+            return copy.deepcopy(cached_data)
 
         try:
             start_time = int((datetime.now() - timedelta(hours=duration_hours)).timestamp() * 1000)
             end_time = int(datetime.now().timestamp() * 1000)
+            window = {"duration_hours": duration_hours, "start_ms": start_time, "end_ms": end_time}
+
+            def legacy_report(events: List[Dict[str, Any]], cross_check: str) -> Dict[str, Any]:
+                return {
+                    "events": events,
+                    "source": "legacy",
+                    "window": window,
+                    # The legacy endpoint reports no total, so coverage is unknown.
+                    "total": None,
+                    "complete": None,
+                    "truncated": None,
+                    "max_events": limit,
+                    "system_log_cross_check": cross_check,
+                }
 
             api_request = ApiRequest(
                 method="post",
@@ -563,56 +638,143 @@ class StatsManager:
             try:
                 response = await self._connection.request(api_request)
             except Exception as legacy_error:
-                logger.debug("Legacy IPS endpoint failed, falling back to v2 security logs: %s", legacy_error)
-                response = await self._get_security_events_v2(start_time, end_time, limit)
+                logger.debug("Legacy IPS endpoint failed, falling back to the v2 system log: %s", legacy_error)
+                try:
+                    report = await self._get_security_events_v2(start_time, end_time, limit)
+                except Exception as v2_error:
+                    raise RuntimeError(
+                        f"the legacy IPS endpoint /stat/ips/event failed ({describe_request_error(legacy_error)}) "
+                        f"and the system-log fallback /system-log/all failed ({describe_request_error(v2_error)}); "
+                        "no source answered, so the absence of events cannot be confirmed"
+                    ) from v2_error
+                report["window"] = window
             else:
-                # A controller that has moved IPS events to the v2 system log answers
-                # this endpoint 200 with an empty list rather than failing, so the
-                # fallback above never fires on the versions it exists for.
-                if not isinstance(response, list) or not response:
-                    logger.debug("Legacy IPS endpoint returned no events, trying v2 security logs")
+                if isinstance(response, list) and response:
+                    report = legacy_report(response, "skipped")
+                else:
+                    # A controller that has moved IPS events to the v2 system log answers
+                    # this endpoint 200 with an empty list rather than failing, so an
+                    # empty legacy answer is cross-checked against the system log.
+                    logger.debug("Legacy IPS endpoint returned no events, trying the v2 system log")
                     try:
-                        response = await self._get_security_events_v2(start_time, end_time, limit)
+                        report = await self._get_security_events_v2(start_time, end_time, limit)
+                        report["window"] = window
                     except Exception as v2_error:
-                        # Deliberately not raising, unlike the branch above: legacy did
-                        # answer here, and a controller old enough to have no v2 endpoint
-                        # answers exactly this way. Returning early leaves the result
-                        # uncached, so a transient v2 outage is retried on the next call
-                        # rather than held as "no threats" for the whole TTL.
-                        logger.debug("v2 security log fallback failed: %s", v2_error)
-                        return []
-            result = response if isinstance(response, list) else []
-            self._connection._update_cache(cache_key, result, timeout=300)
-            return result
+                        if not isinstance(response, list):
+                            raise RuntimeError(
+                                "the legacy IPS endpoint /stat/ips/event answered in an unreadable shape "
+                                f"({type(response).__name__}) and the system-log fallback /system-log/all "
+                                f"failed ({describe_request_error(v2_error)})"
+                            ) from v2_error
+                        failure = await self._system_log_failure(v2_error, start_time, end_time)
+                        if failure is None:
+                            # A controller that predates the system log: the empty legacy
+                            # answer is the authoritative one. Uncached, because a 404 can
+                            # also be a path or proxy problem that clears on retry.
+                            return legacy_report([], "absent")
+                        # Deliberately not raising: legacy did answer, and the caller
+                        # decides. Uncached, so a transient outage is retried next call
+                        # rather than held as "no threats".
+                        logger.warning("System-log cross-check of an empty IPS answer failed: %s", failure)
+                        report = legacy_report([], "failed")
+                        report["system_log_cross_check_error"] = failure
+                        return report
+            self._connection._update_cache(cache_key, copy.deepcopy(report), timeout=300)
+            return report
         except Exception as e:
             logger.error("Error getting IPS events: %s", e)
             raise
 
-    async def _get_security_events_v2(self, start_time: int, end_time: int, limit: int) -> List[Dict[str, Any]]:
-        """Fallback for controllers where legacy IPS events no longer exist."""
-        api_request = ApiRequestV2(
+    async def _system_log_failure(self, error: Exception, start_time: int, end_time: int) -> Optional[str]:
+        """Classify a system-log error after an empty legacy answer.
+
+        Returns None when the system log is absent on this controller, which
+        takes a 404/405 on the first ``/system-log/all`` request and on the
+        ``/system-log/count`` probe used for API detection. Otherwise returns a
+        short description of the failure.
+        """
+        description = describe_request_error(error)
+        if isinstance(error, SystemLogIncompleteError) or not is_endpoint_absent(error):
+            return description
+        probe = ApiRequestV2(
             method="post",
-            path="/system-log/critical",
+            path="/system-log/count",
             data={
                 "timestampFrom": start_time,
                 "timestampTo": end_time,
-                "severities": ["HIGH", "VERY_HIGH"],
+                "severities": list(EVENT_SEVERITIES),
                 "categories": ["SECURITY"],
                 "type": "GENERAL",
-                "pageNumber": 0,
-                "pageSize": min(limit, 100),
-                "searchText": "",
             },
         )
-        response = await self._connection.request(api_request)
-        if isinstance(response, list) and response and isinstance(response[0], dict) and "data" in response[0]:
-            return response[0]["data"][:limit]
-        if isinstance(response, dict):
-            data = response.get("data", response.get("logs", []))
-            return data[:limit] if isinstance(data, list) else []
-        if isinstance(response, list):
-            return response[:limit]
-        return []
+        try:
+            await self._connection.request(probe)
+        except Exception as probe_error:
+            if is_endpoint_absent(probe_error):
+                return None
+            return f"{description}; the /system-log/count probe also failed ({describe_request_error(probe_error)})"
+        return f"{description}, although /system-log/count answered, so the system log exists"
+
+    async def _get_security_events_v2(self, start_time: int, end_time: int, limit: int) -> Dict[str, Any]:
+        """Read SECURITY events at every severity from ``/system-log/all``.
+
+        Pages through the window until ``limit`` events are collected, the
+        controller runs out, or ``IPS_SYSTEM_LOG_MAX_PAGES`` pages have been
+        read. A failure of the first request propagates as-is; a failure after
+        a page was read raises ``SystemLogIncompleteError``. Unreadable
+        responses, an empty page that contradicts the counts, and an empty
+        answer without an exact total raise ``SystemLogResponseError``; only an
+        exact total of 0 that is not a lower bound confirms a quiet window.
+        """
+        max_events = min(limit, IPS_SYSTEM_LOG_MAX_EVENTS)
+        tracker = PageTracker(SYSTEM_LOG_PAGE_SIZE)
+        events: List[Dict[str, Any]] = []
+        page_number = 0
+        more = True
+        while more and len(events) < max_events and page_number < IPS_SYSTEM_LOG_MAX_PAGES:
+            api_request = ApiRequestV2(
+                method="post",
+                path="/system-log/all",
+                data={
+                    "timestampFrom": start_time,
+                    "timestampTo": end_time,
+                    "severities": list(EVENT_SEVERITIES),
+                    "categories": ["SECURITY"],
+                    "type": "GENERAL",
+                    "pageNumber": page_number,
+                    "pageSize": SYSTEM_LOG_PAGE_SIZE,
+                    "searchText": "",
+                },
+            )
+            try:
+                page = parse_system_log_page(await self._connection.request(api_request))
+                tracker.observe(page)
+                more = tracker.has_next_page(page, page_number)
+            except Exception as page_error:
+                if page_number == 0:
+                    raise
+                raise SystemLogIncompleteError(
+                    f"system-log page {page_number + 1} failed after {len(events)} events were read "
+                    f"({describe_request_error(page_error)})"
+                ) from page_error
+            events.extend(page.events)
+            page_number += 1
+
+        if not events and (tracker.total != 0 or tracker.total_is_lower_bound):
+            # Only an exact total of 0 confirms a quiet window; no count, or a
+            # lower-bound count ("0 or more"), confirms nothing.
+            raise SystemLogResponseError(
+                "the system log returned no events and no exact total, so an empty window is unconfirmed"
+            )
+        stopped_early = more or len(events) > max_events
+        events = events[:max_events]
+        return {
+            "events": events,
+            "source": "system-log",
+            "total": tracker.total,
+            **coverage(len(events), tracker.total, tracker.total_is_lower_bound, stopped_early),
+            "max_events": max_events,
+        }
 
     async def get_client_sessions(
         self,

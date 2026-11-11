@@ -3950,7 +3950,8 @@
             "type": "string"
           },
           "limit": {
-            "description": "Maximum number of events to return (default 50)",
+            "description": "Maximum number of events to return (default 50, minimum 1)",
+            "minimum": 1,
             "type": "integer"
           }
         },
